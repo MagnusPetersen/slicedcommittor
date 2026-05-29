@@ -8,10 +8,34 @@ will resolve once the remote is public.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-Sample-based committor function approximation via 1D projections (analogous to
-sliced optimal transport). Given samples and basin labels, the library returns
-the committor q(x): the probability of reaching state B before state A
-starting from configuration x.
+**slicedcommittor** computes the committor function `q(x)`: the probability
+that a stochastic trajectory starting at `x` reaches state `B` before state
+`A`. The committor is the variationally optimal reaction coordinate for rare
+molecular transitions (protein folding, nucleation, ligand binding); its
+level sets define the transition-state ensemble, and the transition-path
+theory identity `k_{A->B} = D[q] / p_A` expresses kinetic rates as a single
+quadrature against it. Computing `q` in high dimensions has traditionally
+required a clustering of state space (Markov state models), a hand-chosen
+basis (Galerkin expansions), or a neural network with an architecture, loss,
+and training schedule.
+
+This library implements the **sliced committor** introduced in
+
+> Petersen, M., Lichtinger, S. and Covino, R.
+> *Committors and reaction rates from random one-dimensional projections*
+> (2026, manuscript submitted).
+
+The method writes the committor as a weighted sum of one-dimensional
+committors along random projections,
+`q(x) ≈ Σ_j w_j · q_j(θ_j · x)`, with each `q_j` from a 1D
+reaction-diffusion solve and the weights `w_j` recovered from a single
+symmetric linear solve on existing equilibrium samples. No clustering, no
+basis, no training; cost is linear in the number of samples and the
+configuration-space dimension. The paper validates the approach on the AIB9
+peptide and villin HP-35 directly from full torsion-angle representations,
+without any pre-specified reaction coordinate.
+
+See [Citation](#citation) for how to cite the work.
 
 ## Method
 
@@ -288,16 +312,26 @@ re-projects on demand.
 
 ## Citation
 
-If you use this library in published work, please cite the accompanying paper.
-The DOI and full BibTeX block will be filled in on the first tagged release.
+If you use `slicedcommittor` in published work, please cite the paper:
+
+> Petersen, M., Lichtinger, S. and Covino, R.
+> *Committors and reaction rates from random one-dimensional projections*
+> (2026, manuscript submitted).
+
+A machine-readable [`CITATION.cff`](CITATION.cff) sits at the repo root. GitHub
+renders a **"Cite this repository"** button on the project page (top-right
+sidebar) that exports the entry as BibTeX, APA, EndNote, or RIS with one click.
+
+BibTeX:
 
 ```bibtex
-@article{petersen_sliced_committor,
-  title   = {Sliced committor functions via random one-dimensional projections},
-  author  = {Petersen, Magnus and others},
+@article{petersen2026sliced,
+  title   = {Committors and reaction rates from random one-dimensional projections},
+  author  = {Petersen, Magnus and Lichtinger, Simon and Covino, Roberto},
   year    = {2026},
-  journal = {TODO},
-  doi     = {TODO},
-  note    = {Fill in once published},
+  note    = {Manuscript submitted; journal and DOI to be filled in on acceptance.},
 }
 ```
+
+Update the `note`, `journal`, and `doi` fields once the paper is accepted;
+keep [`CITATION.cff`](CITATION.cff) in lockstep with the BibTeX block.
