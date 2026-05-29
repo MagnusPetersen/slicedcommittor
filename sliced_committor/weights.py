@@ -430,8 +430,7 @@ def _resolve_epsilon_fn(epsilon_fn):
         if epsilon_fn not in EPSILON_ESTIMATORS:
             valid = ", ".join(sorted(EPSILON_ESTIMATORS))
             raise ValueError(
-                f"compute_epsilon: unknown estimator name {epsilon_fn!r}. "
-                f"Valid choices: {valid}."
+                f"compute_epsilon: unknown estimator name {epsilon_fn!r}. Valid choices: {valid}."
             )
         return EPSILON_ESTIMATORS[epsilon_fn]
     if isinstance(epsilon_fn, type) or not callable(epsilon_fn):
