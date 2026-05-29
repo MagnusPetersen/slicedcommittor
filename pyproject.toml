@@ -39,11 +39,11 @@ classifiers = [
 dependencies = ["jax>=0.4.20", "numpy>=1.24"]
 
 [project.urls]
-Homepage = "https://github.com/magnuspetersen/slicedcommittor"
-Repository = "https://github.com/magnuspetersen/slicedcommittor"
+Homepage = "https://github.com/MagnusPetersen/slicedcommittor"
+Repository = "https://github.com/MagnusPetersen/slicedcommittor"
 Documentation = "https://slicedcommittor.readthedocs.io"
-Issues = "https://github.com/magnuspetersen/slicedcommittor/issues"
-Changelog = "https://github.com/magnuspetersen/slicedcommittor/blob/main/CHANGELOG.md"
+Issues = "https://github.com/MagnusPetersen/slicedcommittor/issues"
+Changelog = "https://github.com/MagnusPetersen/slicedcommittor/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = ["pytest>=7.4", "pytest-cov>=4.1"]

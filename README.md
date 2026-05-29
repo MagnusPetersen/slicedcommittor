@@ -4,7 +4,7 @@
 The repository is private during initial collaboration; the badges below
 will resolve once the remote is public.
 -->
-[![CI](https://github.com/magnuspetersen/slicedcommittor/actions/workflows/test.yml/badge.svg)](https://github.com/magnuspetersen/slicedcommittor/actions/workflows/test.yml)
+[![CI](https://github.com/MagnusPetersen/slicedcommittor/actions/workflows/test.yml/badge.svg)](https://github.com/MagnusPetersen/slicedcommittor/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
@@ -73,7 +73,7 @@ Galerkin-monotonicity property in full.
 pip install -e .
 
 # directly from GitHub (requires read access to the private repo):
-pip install git+ssh://git@github.com/magnuspetersen/slicedcommittor.git
+pip install git+ssh://git@github.com/MagnusPetersen/slicedcommittor.git
 ```
 
 Hard dependencies: `jax >= 0.4.20`, `numpy >= 1.24`. Users pick the JAX

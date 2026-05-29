@@ -95,5 +95,5 @@ $1/\beta_{\rm physical}$ if you want physical units.
 
 The accompanying paper derives the constraint algebra and the
 Galerkin-monotonicity property in full. Once available, the DOI and a
-formal citation will appear in the [README](https://github.com/magnuspetersen/slicedcommittor#citation)
+formal citation will appear in the [README](https://github.com/MagnusPetersen/slicedcommittor#citation)
 and in [CHANGELOG](changelog.md).

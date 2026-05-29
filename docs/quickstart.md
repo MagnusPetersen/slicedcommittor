@@ -7,7 +7,7 @@
 pip install -e .
 
 # or directly from GitHub (requires read access):
-pip install git+ssh://git@github.com/magnuspetersen/slicedcommittor.git
+pip install git+ssh://git@github.com/MagnusPetersen/slicedcommittor.git
 ```
 
 Optional extras:
