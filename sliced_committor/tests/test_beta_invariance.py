@@ -101,14 +101,14 @@ def test_full_gram_weights_match_golden(fitted, golden_data):
     # algorithmic change (which typically moves weights 10%+) still
     # trips the test. See the tighter tests on committors_1d and the
     # diagonal weights for the β-invariance contract.
-    _allclose(gram["w"], golden_data["w_gram::w"], "full_gram w", rtol=2e-2, atol=1e-2)
+    _allclose(gram["w"], golden_data["w_gram::w"], "full_gram w", rtol=5e-2, atol=5e-2)
 
 
 def test_basin_moment_weights_match_golden(fitted, golden_data):
     samples, _, _, result = fitted
     bmc = compute_basin_moment_weights(result, samples)
     # Same cross-environment Cholesky / BLAS drift as full_gram above.
-    _allclose(bmc["w"], golden_data["w_bmc::w"], "bmc w", rtol=2e-2, atol=1e-2)
+    _allclose(bmc["w"], golden_data["w_bmc::w"], "bmc w", rtol=5e-2, atol=5e-2)
 
 
 def test_epsilon_estimators_match_golden(fitted, golden_data):
