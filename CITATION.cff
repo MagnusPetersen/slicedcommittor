@@ -1,0 +1,75 @@
+# Citation File Format v1.2
+# https://citation-file-format.github.io/
+#
+# GitHub renders a "Cite this repository" button on the project page when this
+# file is present. Update `version` / `date-released` on every tagged release,
+# and fill in the `preferred-citation` doi / journal fields once the paper is
+# accepted.
+
+cff-version: 1.2.0
+title: slicedcommittor
+message: >-
+  If you use this software, please cite both the article and the software
+  itself, using the metadata in `preferred-citation` below.
+type: software
+authors:
+  - family-names: Petersen
+    given-names: Magnus
+    affiliation: >-
+      Goethe University Frankfurt and Frankfurt Institute for Advanced Studies,
+      Frankfurt am Main, Germany
+    email: mapetersen@fias.uni-frankfurt.de
+  - family-names: Lichtinger
+    given-names: Simon
+    affiliation: >-
+      Goethe University Frankfurt and Frankfurt Institute for Advanced Studies,
+      Frankfurt am Main, Germany
+  - family-names: Covino
+    given-names: Roberto
+    affiliation: >-
+      Goethe University Frankfurt and Frankfurt Institute for Advanced Studies,
+      Frankfurt am Main, Germany
+repository-code: "https://github.com/MagnusPetersen/slicedcommittor"
+url: "https://github.com/MagnusPetersen/slicedcommittor"
+abstract: >-
+  Sample-based committor approximation via random 1D projections.
+  The library writes the committor as a weighted sum of 1D
+  reaction-diffusion committors along random projections, with weights
+  recovered from a single symmetric linear solve on equilibrium samples,
+  at cost linear in the number of samples and the configuration-space
+  dimension.
+keywords:
+  - committor
+  - reaction-rate
+  - rare-events
+  - molecular-dynamics
+  - transition-path-theory
+  - sliced-methods
+  - jax
+license: MIT
+version: 0.4.0
+date-released: "2026-05-29"
+
+# The canonical scientific reference. This is what GitHub's
+# "Cite this repository" button surfaces to citation managers.
+preferred-citation:
+  type: article
+  title: Committors and reaction rates from random one-dimensional projections
+  authors:
+    - family-names: Petersen
+      given-names: Magnus
+      affiliation: >-
+        Goethe University Frankfurt and Frankfurt Institute for Advanced Studies,
+        Frankfurt am Main, Germany
+    - family-names: Lichtinger
+      given-names: Simon
+      affiliation: >-
+        Goethe University Frankfurt and Frankfurt Institute for Advanced Studies,
+        Frankfurt am Main, Germany
+    - family-names: Covino
+      given-names: Roberto
+      affiliation: >-
+        Goethe University Frankfurt and Frankfurt Institute for Advanced Studies,
+        Frankfurt am Main, Germany
+  year: 2026
+  notes: Manuscript submitted; journal and DOI to be filled in on acceptance.
