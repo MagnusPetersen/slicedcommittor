@@ -1,0 +1,132 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slicedcommittor"
+version = "0.4.0"
+description = "Sample-based committor approximation via 1D projections"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Magnus Petersen", email = "mapetersen@fias.uni-frankfurt.de" }]
+maintainers = [{ name = "Magnus Petersen", email = "mapetersen@fias.uni-frankfurt.de" }]
+keywords = [
+    "committor",
+    "molecular-dynamics",
+    "rare-events",
+    "sliced",
+    "jax",
+    "reaction-diffusion",
+    "transition-path",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+dependencies = ["jax>=0.4.20", "numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/magnuspetersen/slicedcommittor"
+Repository = "https://github.com/magnuspetersen/slicedcommittor"
+Documentation = "https://slicedcommittor.readthedocs.io"
+Issues = "https://github.com/magnuspetersen/slicedcommittor/issues"
+Changelog = "https://github.com/magnuspetersen/slicedcommittor/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest>=7.4", "pytest-cov>=4.1"]
+docs = [
+    "sphinx>=7.2",
+    "furo>=2024.1.29",
+    "sphinx-autodoc-typehints>=1.25",
+    "myst-parser>=2.0",
+]
+lint = ["ruff>=0.5", "pre-commit>=3.5"]
+examples = ["matplotlib>=3.7", "jupyter>=1.0"]
+dev = ["slicedcommittor[test,docs,lint,examples]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["sliced_committor"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"sliced_committor/py.typed" = "sliced_committor/py.typed"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["dist", "build", "docs/_build"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # line-length handled by formatter; long math lines OK
+    "B008",   # default arg call (JAX patterns)
+    "SIM108", # ternary not always clearer
+    "RUF001", # ambiguous unicode (Greek letters in math identifiers)
+    "RUF002", # ambiguous unicode in docstrings (math)
+    "RUF003", # ambiguous unicode in comments (math)
+    "RUF013", # implicit Optional (legacy hints in JAX-typed APIs)
+    "B028",   # missing stacklevel in warnings (intentional in some places)
+    "F401",   # re-exports in __init__.py and similar
+    "E402",   # JAX requires `jax.config.update(...)` before importing JAX-typed code
+    "UP035",  # `typing.Dict`/`Tuple` style retained for JAX API consistency
+    "RUF059", # unused-unpacked-variable: ergonomic tuple destructuring
+    "F841",   # unused local: defensive computations in JIT-traced paths
+    "B905",   # zip without strict= (JAX vmap compatibility)
+    "B007",   # unused loop control variable (common in Python idioms)
+    "RUF022", # __all__ ordering: we group by purpose, not alphabetically
+    "RUF046", # cast(int, ...) in some indexing paths
+]
+
+[tool.ruff.lint.per-file-ignores]
+"sliced_committor/tests/*" = ["B011", "E741"]
+"sliced_committor/_internal.py" = ["F401"]
+"sliced_committor/__init__.py" = ["F401", "I001"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths = ["sliced_committor/tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:jax.*",
+]
+
+[tool.coverage.run]
+source = ["sliced_committor"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

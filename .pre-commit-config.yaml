@@ -1,0 +1,25 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=200]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: no-em-dash
+        name: reject em dashes (U+2014)
+        entry: bash -c 'if grep -nP "\xe2\x80\x94" "$@" 2>/dev/null; then echo "Em dashes are forbidden. Use :,;./" && exit 1; fi' --
+        language: system
+        types_or: [python, markdown, yaml, rst, text]
