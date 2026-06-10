@@ -319,8 +319,9 @@ def test_committor_rate_unknown_reduction_raises(committor_and_trajectory):
 
 def _flux_profile(values, n=50):
     centers = (np.arange(n) + 0.5) / n
-    return sc.Profile(levels=centers, values=np.asarray(values, float),
-                      counts=np.full(n, 100), name="committor")
+    return sc.Profile(
+        levels=centers, values=np.asarray(values, float), counts=np.full(n, 100), name="committor"
+    )
 
 
 def test_find_plateau_flat_profile_takes_widest_interior():
@@ -329,18 +330,18 @@ def test_find_plateau_flat_profile_takes_widest_interior():
     vals = 1.0 + 0.01 * rng.standard_normal(n)  # near-constant flux
     pw = sc.find_plateau(_flux_profile(vals, n), margin=0.05)
     assert pw.ok and pw.flatness < 0.1
-    assert pw.lo <= 0.15 and pw.hi >= 0.85   # near-full interior window
+    assert pw.lo <= 0.15 and pw.hi >= 0.85  # near-full interior window
     assert pw.value == pytest.approx(1.0, abs=0.1)
 
 
 def test_find_plateau_excludes_basin_spikes():
     n = 50
     vals = np.ones(n)
-    vals[:6] = 12.0    # basin-side inflation (q≈0)
-    vals[-6:] = 12.0   # basin-side inflation (q≈1)
+    vals[:6] = 12.0  # basin-side inflation (q≈0)
+    vals[-6:] = 12.0  # basin-side inflation (q≈1)
     pw = sc.find_plateau(_flux_profile(vals, n), margin=0.02)
     assert pw.ok
-    assert pw.lo >= 0.1 and pw.hi <= 0.9     # spikes excluded
+    assert pw.lo >= 0.1 and pw.hi <= 0.9  # spikes excluded
     assert pw.value == pytest.approx(1.0, abs=0.2)
 
 
@@ -380,8 +381,9 @@ def test_saddle_bridge_calibrates_feature_space_rate(committor_and_trajectory):
     q, s, in_A, in_B, traj = committor_and_trajectory
     bridge = sc.saddle_bridge_D(q, s, traj, dt=0.01, q_star=0.5, n_bins=50)
     tpt = sc.tpt_rate(q, s, D=bridge, at="auto", in_A=in_A, in_B=in_B)
-    cr = sc.committor_rate(q, s, traj, dt=0.01, reduction="plateau", at="auto",
-                           n_bins=50, in_A=in_A, in_B=in_B)
+    cr = sc.committor_rate(
+        q, s, traj, dt=0.01, reduction="plateau", at="auto", n_bins=50, in_A=in_A, in_B=in_B
+    )
     assert tpt["k_AB"] > 0 and cr["k_AB"] > 0
     assert 0.1 < tpt["k_AB"] / cr["k_AB"] < 10.0
 

@@ -324,13 +324,25 @@ def _density_and_diffusion(
     :func:`saddle_bridge_D`) cannot drift apart.
     """
     pi_prof = density(
-        committor, samples, at=None, sample_weights=sample_weights,
-        n_bins=n_bins, coordinate=coordinate,
+        committor,
+        samples,
+        at=None,
+        sample_weights=sample_weights,
+        n_bins=n_bins,
+        coordinate=coordinate,
     )
     D_prof = diffusion_coefficient(
-        committor, trajectory, dt=dt, at=None, coordinate=traj_coordinate,
-        lag=lag, lag_candidates=lag_candidates,
-        window_ids=window_ids, n_bins=n_bins, min_count=min_count, method=diffusion_method,
+        committor,
+        trajectory,
+        dt=dt,
+        at=None,
+        coordinate=traj_coordinate,
+        lag=lag,
+        lag_candidates=lag_candidates,
+        window_ids=window_ids,
+        n_bins=n_bins,
+        min_count=min_count,
+        method=diffusion_method,
     )
     return pi_prof, D_prof
 
@@ -441,9 +453,9 @@ class BridgeD(NamedTuple):
     its calibration intermediates are kept as fields.
     """
 
-    D: float          # the calibrated scalar configurational diffusion
-    D_q_ref: float    # D_q(q*) (saddle_local) or ⟨D_q⟩_π (volume_average)
-    g_ref: float      # ⟨|∇q̄|²⟩_{q*} (saddle_local) or ⟨|∇q̄|²⟩_π (volume_average)
+    D: float  # the calibrated scalar configurational diffusion
+    D_q_ref: float  # D_q(q*) (saddle_local) or ⟨D_q⟩_π (volume_average)
+    g_ref: float  # ⟨|∇q̄|²⟩_{q*} (saddle_local) or ⟨|∇q̄|²⟩_π (volume_average)
     q_star: float
     mode: str
 
@@ -495,19 +507,35 @@ def saddle_bridge_D(
         :class:`BridgeD` (callable scalar D + calibration diagnostics).
     """
     pi_prof, D_prof = _density_and_diffusion(
-        committor, samples, trajectory, dt=dt, n_bins=n_bins,
-        sample_weights=sample_weights, window_ids=window_ids,
-        coordinate=coordinate, traj_coordinate=traj_coordinate,
-        lag=lag, lag_candidates=lag_candidates,
-        min_count=min_count, diffusion_method=diffusion_method,
+        committor,
+        samples,
+        trajectory,
+        dt=dt,
+        n_bins=n_bins,
+        sample_weights=sample_weights,
+        window_ids=window_ids,
+        coordinate=coordinate,
+        traj_coordinate=traj_coordinate,
+        lag=lag,
+        lag_candidates=lag_candidates,
+        min_count=min_count,
+        diffusion_method=diffusion_method,
     )
     # ⟨|∇q̄|²⟩(q) = Φ_{D=1}(q) / π(q): the iso-q-conditional mean squared gradient
     # (the co-area sum divided by the density on the SAME [0,1] grid).
-    Phi1 = reactive_flux(committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins)
+    Phi1 = reactive_flux(
+        committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins
+    )
     pi = np.asarray(pi_prof.values, dtype=np.float64)
-    g_of_q = np.where(pi > 0, np.asarray(Phi1.values, dtype=np.float64) / np.where(pi > 0, pi, 1.0), np.nan)
-    g_prof = Profile(levels=np.asarray(pi_prof.levels, dtype=np.float64), values=g_of_q,
-                     counts=pi_prof.counts, name="committor")
+    g_of_q = np.where(
+        pi > 0, np.asarray(Phi1.values, dtype=np.float64) / np.where(pi > 0, pi, 1.0), np.nan
+    )
+    g_prof = Profile(
+        levels=np.asarray(pi_prof.levels, dtype=np.float64),
+        values=g_of_q,
+        counts=pi_prof.counts,
+        name="committor",
+    )
 
     if mode == "saddle_local":
         lo, hi = max(0.0, q_star - band), min(1.0, q_star + band)

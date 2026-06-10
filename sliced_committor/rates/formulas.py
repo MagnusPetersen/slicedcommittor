@@ -115,11 +115,19 @@ def _committor_profiles(
     invariant (no feature-space gradient, no length-scale D).
     """
     pi_prof, D_prof = _density_and_diffusion(
-        committor, samples, trajectory, dt=dt, n_bins=n_bins,
-        sample_weights=sample_weights, window_ids=window_ids,
-        coordinate=coordinate, traj_coordinate=traj_coordinate,
-        lag=lag, lag_candidates=lag_candidates,
-        min_count=min_count, diffusion_method=diffusion_method,
+        committor,
+        samples,
+        trajectory,
+        dt=dt,
+        n_bins=n_bins,
+        sample_weights=sample_weights,
+        window_ids=window_ids,
+        coordinate=coordinate,
+        traj_coordinate=traj_coordinate,
+        lag=lag,
+        lag_candidates=lag_candidates,
+        min_count=min_count,
+        diffusion_method=diffusion_method,
     )
     centers = np.asarray(pi_prof.levels, dtype=np.float64)
     pi = np.where(np.isfinite(pi_prof.values), pi_prof.values, 0.0)
@@ -189,8 +197,9 @@ def dirichlet_rate(
         pw = find_plateau(Profile(levels=centers, values=Phi, counts=counts))
         nu_R = _plateau_flux(levels, contrib, pw.lo, pw.hi)
         report = _plateau_report(centers, Phi, counts, pw.lo, pw.hi)
-        return _rate_dict(rho_A, rho_B, nu_R=nu_R, kind="auto",
-                          plateau_auto=True, plateau_ok=pw.ok, **report)
+        return _rate_dict(
+            rho_A, rho_B, nu_R=nu_R, kind="auto", plateau_auto=True, plateau_ok=pw.ok, **report
+        )
     if at is None:
         nu_R = float(np.sum(contrib))  # volume integral D⟨|∇q̄|²⟩_π
         return _rate_dict(rho_A, rho_B, nu_R=nu_R, kind="full")
@@ -303,11 +312,23 @@ def berezhkovskii_szabo_rate(
     if reduction is None:
         raise ValueError(f"unknown mode={mode!r}; use 'local' or 'mfpt'")
     out = committor_rate(
-        committor, samples, trajectory, dt=dt, reduction=reduction, at=at,
-        sample_weights=sample_weights, window_ids=window_ids, in_A=in_A, in_B=in_B,
-        n_bins=n_bins, lag=lag, lag_candidates=lag_candidates,
-        min_count=min_count, coordinate=coordinate,
-        traj_coordinate=traj_coordinate, diffusion_method=diffusion_method,
+        committor,
+        samples,
+        trajectory,
+        dt=dt,
+        reduction=reduction,
+        at=at,
+        sample_weights=sample_weights,
+        window_ids=window_ids,
+        in_A=in_A,
+        in_B=in_B,
+        n_bins=n_bins,
+        lag=lag,
+        lag_candidates=lag_candidates,
+        min_count=min_count,
+        coordinate=coordinate,
+        traj_coordinate=traj_coordinate,
+        diffusion_method=diffusion_method,
     )
     out["mode"] = mode
     return out
@@ -369,11 +390,19 @@ def kramers_rate(
         and barrier diagnostics.
     """
     pi_prof, D_prof = _density_and_diffusion(
-        committor, samples, trajectory, dt=dt, n_bins=n_bins,
-        sample_weights=sample_weights, window_ids=window_ids,
-        coordinate=coordinate, traj_coordinate=traj_coordinate,
-        lag=lag, lag_candidates=lag_candidates,
-        min_count=min_count, diffusion_method=diffusion_method,
+        committor,
+        samples,
+        trajectory,
+        dt=dt,
+        n_bins=n_bins,
+        sample_weights=sample_weights,
+        window_ids=window_ids,
+        coordinate=coordinate,
+        traj_coordinate=traj_coordinate,
+        lag=lag,
+        lag_candidates=lag_candidates,
+        min_count=min_count,
+        diffusion_method=diffusion_method,
     )
     centers = pi_prof.levels
     pi = pi_prof.values
@@ -476,11 +505,19 @@ def committor_rate(
         for the harmonic reduction, which yields ``mfpt_AB/BA`` + ``k`` directly).
     """
     centers, pi, Dq, pi_prof, D_prof = _committor_profiles(
-        committor, samples, trajectory, dt=dt, n_bins=n_bins,
-        sample_weights=sample_weights, window_ids=window_ids,
-        coordinate=coordinate, traj_coordinate=traj_coordinate,
-        lag=lag, lag_candidates=lag_candidates,
-        min_count=min_count, diffusion_method=diffusion_method,
+        committor,
+        samples,
+        trajectory,
+        dt=dt,
+        n_bins=n_bins,
+        sample_weights=sample_weights,
+        window_ids=window_ids,
+        coordinate=coordinate,
+        traj_coordinate=traj_coordinate,
+        lag=lag,
+        lag_candidates=lag_candidates,
+        min_count=min_count,
+        diffusion_method=diffusion_method,
     )
     rho_A, rho_B = _populations(committor, samples, sample_weights, in_A, in_B)
     red = reduction.lower()
@@ -488,9 +525,13 @@ def committor_rate(
     if red in ("harmonic", "mfpt"):
         mfpt_AB, mfpt_BA = _mfpt_from_profiles(centers, pi, Dq, at)
         return _rate_dict(
-            rho_A, rho_B,
-            k_AB=_inv_mfpt(mfpt_AB), k_BA=_inv_mfpt(mfpt_BA),
-            mfpt_AB=mfpt_AB, mfpt_BA=mfpt_BA, reduction="harmonic",
+            rho_A,
+            rho_B,
+            k_AB=_inv_mfpt(mfpt_AB),
+            k_BA=_inv_mfpt(mfpt_BA),
+            mfpt_AB=mfpt_AB,
+            mfpt_BA=mfpt_BA,
+            reduction="harmonic",
         )
 
     flux = Dq * pi  # ν_R(q) = D_q(q) π(q)
@@ -519,8 +560,13 @@ def committor_rate(
         pi_at = value_at(pi_prof, q_star)
         nu_R = D_at * pi_at
         return _rate_dict(
-            rho_A, rho_B, nu_R=nu_R, reduction="local",
-            D_at_q_star=float(D_at), pi_at_q_star=float(pi_at), q_star=q_star,
+            rho_A,
+            rho_B,
+            nu_R=nu_R,
+            reduction="local",
+            D_at_q_star=float(D_at),
+            pi_at_q_star=float(pi_at),
+            q_star=q_star,
         )
 
     raise ValueError(
