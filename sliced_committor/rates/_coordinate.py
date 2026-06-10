@@ -109,7 +109,9 @@ class PlateauWindow(NamedTuple):
     ok: bool
 
 
-def find_plateau(profile: Profile, *, min_width=0.2, tol=0.25, min_bins=3, min_count=1, margin=0.05):
+def find_plateau(
+    profile: Profile, *, min_width=0.2, tol=0.25, min_bins=3, min_count=1, margin=0.05
+):
     """Locate the flattest flux window -- the automatic reaction-rate plateau.
 
     The reactive flux Φ(c) (or any iso-committor flux profile, e.g. ``D_q·π``)
@@ -158,8 +160,8 @@ def find_plateau(profile: Profile, *, min_width=0.2, tol=0.25, min_bins=3, min_c
     p1 = np.concatenate(([0.0], np.cumsum(vy)))
     p2 = np.concatenate(([0.0], np.cumsum(vy * vy)))
 
-    best_ok = None      # (width, -flatness, i, j) for windows meeting tol
-    best_any = None     # (flatness, -width, i, j) global minimum-flatness fallback
+    best_ok = None  # (width, -flatness, i, j) for windows meeting tol
+    best_any = None  # (flatness, -width, i, j) global minimum-flatness fallback
     for i in range(n):
         for j in range(i + min_bins - 1, n):
             width = vc[j] - vc[i]
