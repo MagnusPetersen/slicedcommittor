@@ -12,16 +12,13 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
-from sliced_committor.weights import compute_epsilon
+from sliced_committor.core.weights import compute_epsilon
+
+from ._helpers import two_basin_samples
 
 
 def _toy_samples(n=400, seed=0):
-    rng = np.random.default_rng(seed)
-    samples = jnp.asarray(rng.standard_normal((n, 2)))
-    in_A = jnp.linalg.norm(samples - jnp.asarray([-2.0, 0.0]), axis=1) < 0.6
-    in_B = jnp.linalg.norm(samples - jnp.asarray([2.0, 0.0]), axis=1) < 0.6
-    in_A = in_A & ~in_B
-    return samples, in_A, in_B
+    return two_basin_samples(n, seed=seed, radius=0.6)
 
 
 def test_rejects_non_2d_samples():

@@ -9,14 +9,11 @@ jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
 
+from ._helpers import TOL_SOLVER, two_basin_samples
+
 
 def _two_basin_samples(n=600, seed=0):
-    rng = np.random.default_rng(seed)
-    samples = jnp.asarray(rng.standard_normal((n, 2)))
-    in_A = jnp.linalg.norm(samples - jnp.asarray([-2.0, 0.0]), axis=1) < 0.7
-    in_B = jnp.linalg.norm(samples - jnp.asarray([2.0, 0.0]), axis=1) < 0.7
-    in_A = in_A & ~in_B
-    return samples, in_A, in_B
+    return two_basin_samples(n, seed=seed)
 
 
 def test_diagonal_weights_normalised_and_nonnegative():
@@ -27,7 +24,7 @@ def test_diagonal_weights_normalised_and_nonnegative():
     ]
     w = np.asarray(weights)
     # Diagonal RD weights sum to 1 (softmax of log-weights).
-    np.testing.assert_allclose(w.sum(), 1.0, atol=1e-6)
+    np.testing.assert_allclose(w.sum(), 1.0, atol=TOL_SOLVER)
     # And carry no negative mass (the (1-eps)+ correction guarantees this).
     assert (w >= -1e-12).all(), f"negative weights: min = {w.min()}"
 

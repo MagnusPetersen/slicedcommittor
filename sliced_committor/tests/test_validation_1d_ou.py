@@ -94,7 +94,7 @@ def test_recovers_ou_closed_form(ou_data, weight_fn_name):
 
     in_A_pts = jnp.asarray(x_eval < a + 0.2)
     in_B_pts = jnp.asarray(x_eval > b - 0.2)
-    q_pred = sc.evaluate_committor(result, points, weights, in_A=in_A_pts, in_B=in_B_pts)
+    q_pred = sc.build_committor(result, weights)(points, in_A=in_A_pts, in_B=in_B_pts)
     q_pred = np.asarray(q_pred)
 
     rmse = float(np.sqrt(np.mean((q_pred - q_true) ** 2)))

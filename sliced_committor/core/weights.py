@@ -141,6 +141,26 @@ def _interpolate_q_at_samples_masked(slice_coords, committors_1d, projected_samp
     return vmap(_interp_single)(slice_coords, committors_1d, projected_samples)
 
 
+def _basin_weight_sums(in_A, in_B, sample_weights):
+    """Per-basin sample weights and their floored normalisers.
+
+    Shared by the equilibrium / RMS epsilon estimators: builds
+    ``w_A = W·1_A`` and ``w_B = W·1_B`` from the (optional) sample weights
+    ``W`` (uniform ``1/N`` when ``sample_weights`` is None) and returns their
+    sums floored at ``1e-30`` to guard the downstream divisions.
+
+    Returns:
+        ``(w_A, w_B, Z_A, Z_B)``.
+    """
+    N = in_A.shape[0]
+    W = jnp.ones(N, dtype=jnp.float64) / N if sample_weights is None else sample_weights
+    w_A = W * in_A.astype(W.dtype)
+    w_B = W * in_B.astype(W.dtype)
+    Z_A = jnp.maximum(jnp.sum(w_A), 1e-30)
+    Z_B = jnp.maximum(jnp.sum(w_B), 1e-30)
+    return w_A, w_B, Z_A, Z_B
+
+
 def compute_epsilon_equilibrium(ctx, sample_weights=None):
     """Equilibrium-weighted boundary error: eps_A = mean(q at A), eps_B = mean(1-q at B).
 
@@ -158,17 +178,7 @@ def compute_epsilon_equilibrium(ctx, sample_weights=None):
     if ctx.projected_samples is None:
         raise ValueError("projected_samples required for epsilon computation")
     in_A, in_B = ctx.in_A, ctx.in_B
-    N = in_A.shape[0]
-
-    if sample_weights is None:
-        W = jnp.ones(N, dtype=jnp.float64) / N
-    else:
-        W = sample_weights
-
-    w_A = W * in_A.astype(W.dtype)
-    w_B = W * in_B.astype(W.dtype)
-    Z_A = jnp.maximum(jnp.sum(w_A), 1e-30)
-    Z_B = jnp.maximum(jnp.sum(w_B), 1e-30)
+    w_A, w_B, Z_A, Z_B = _basin_weight_sums(in_A, in_B, sample_weights)
 
     q_A = _interpolate_q_at_samples_masked(
         ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_A
@@ -199,17 +209,7 @@ def compute_epsilon_rms(ctx, sample_weights=None):
     if ctx.projected_samples is None:
         raise ValueError("projected_samples required for epsilon computation")
     in_A, in_B = ctx.in_A, ctx.in_B
-    N = in_A.shape[0]
-
-    if sample_weights is None:
-        W = jnp.ones(N, dtype=jnp.float64) / N
-    else:
-        W = sample_weights
-
-    w_A = W * in_A.astype(W.dtype)
-    w_B = W * in_B.astype(W.dtype)
-    Z_A = jnp.maximum(jnp.sum(w_A), 1e-30)
-    Z_B = jnp.maximum(jnp.sum(w_B), 1e-30)
+    w_A, w_B, Z_A, Z_B = _basin_weight_sums(in_A, in_B, sample_weights)
 
     q_A = _interpolate_q_at_samples_masked(
         ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_A
@@ -430,7 +430,8 @@ def _resolve_epsilon_fn(epsilon_fn):
         if epsilon_fn not in EPSILON_ESTIMATORS:
             valid = ", ".join(sorted(EPSILON_ESTIMATORS))
             raise ValueError(
-                f"compute_epsilon: unknown estimator name {epsilon_fn!r}. Valid choices: {valid}."
+                f"compute_epsilon: unknown estimator name {epsilon_fn!r}. "
+                f"Valid choices: {valid}."
             )
         return EPSILON_ESTIMATORS[epsilon_fn]
     if isinstance(epsilon_fn, type) or not callable(epsilon_fn):
@@ -1644,11 +1645,11 @@ def thin_shell_bcm_weights(
 #   D[r] ≥ D[q̄*] − α_D² · σ_M
 #
 # which is the certified basis-gap piece: the residual that direction
-# enrichment can remove. The complement α_D²·σ_M upper-bounds the shrinkage
-# piece, which 1D-RD recalibration (sliced_committor.calibration.recalibrate)
-# can remove.
-# Use ``eta_basis = D[r]_lower / D[q̄*]`` to route: small → recalibrate,
-# large → enrich directions.
+# enrichment can remove. The complement α_D²·σ_M upper-bounds the
+# BC-shrinkage piece (the part attributable to basin-mean shrinkage rather
+# than basis incompleteness).
+# Use ``eta_basis = D[r]_lower / D[q̄*]`` as a diagnostic: small ⇒ residual
+# is shrinkage-dominated, large ⇒ enrich directions.
 # ===========================================================================
 
 
@@ -1708,18 +1709,17 @@ def compute_residual_decomposition(
 
     Decomposes E(w*) = D[q̄* − q] into
 
-        (ε̄*)² · D[q]   (BC-shrinkage piece, removable by recalibration G)
+        (ε̄*)² · D[q]   (BC-shrinkage piece, from basin-mean shrinkage)
         D[r]            (basis-gap piece, removable only by direction enrichment)
 
     via the (B) lower bound D[r] ≥ D[q̄*] − α_D² · σ_M, where σ_M is the GFI
     upper bound on D[q] (already in ``gram_result['sigma_M']``) and α_D is
     estimated by :func:`compute_alpha_d_sepdist`.
 
-    Use ``eta_basis`` ∈ [0, 1] as a routing signal:
+    Use ``eta_basis`` ∈ [0, 1] as a diagnostic:
       * ``eta_basis`` near 1 ⇒ residual is dominated by basis incompleteness;
-        adding directions (Components C, D) will help; recalibration is a no-op.
-      * ``eta_basis`` near 0 ⇒ residual is dominated by BC-shrinkage; G's
-        1D-RD recalibration will remove most of it.
+        adding directions (Components C, D) will help.
+      * ``eta_basis`` near 0 ⇒ residual is dominated by BC-shrinkage.
 
     Args:
         gram_result: dict from :func:`full_gram_weights` (must contain ``'w'``,

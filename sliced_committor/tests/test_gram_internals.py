@@ -13,19 +13,17 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
-from sliced_committor.gram import (
+from sliced_committor.core.gram import (
     _assemble_gram_matrix,
     _compute_derivative_matrix,
     compute_shared_gram_diagnostics,
 )
 
+from ._helpers import two_basin_samples
+
 
 def _build_ctx(n=200, M=12, seed=0):
-    rng = np.random.default_rng(seed)
-    samples = jnp.asarray(rng.standard_normal((n, 2)))
-    in_A = jnp.linalg.norm(samples - jnp.asarray([-2.0, 0.0]), axis=1) < 0.7
-    in_B = jnp.linalg.norm(samples - jnp.asarray([2.0, 0.0]), axis=1) < 0.7
-    in_A = in_A & ~in_B
+    samples, in_A, in_B = two_basin_samples(n, seed=seed)
     result = sc.compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=M, seed=seed)
     return sc.make_weighting_context(result), samples
 

@@ -3,7 +3,7 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "slicedcommittor"
+name = "sliced-committor"
 version = "0.4.0"
 description = "Sample-based committor approximation via 1D projections"
 readme = "README.md"
@@ -55,7 +55,7 @@ docs = [
 ]
 lint = ["ruff>=0.5", "pre-commit>=3.5"]
 examples = ["matplotlib>=3.7", "jupyter>=1.0"]
-dev = ["slicedcommittor[test,docs,lint,examples]"]
+dev = ["sliced-committor[test,docs,lint,examples]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["sliced_committor"]
@@ -100,8 +100,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"examples/*" = ["E702"]  # compact plotting / array idioms (a; b) in example scripts
 "sliced_committor/tests/*" = ["B011", "E741"]
-"sliced_committor/_internal.py" = ["F401"]
+"sliced_committor/core/_internal.py" = ["F401"]
 "sliced_committor/__init__.py" = ["F401", "I001"]
 
 [tool.ruff.format]

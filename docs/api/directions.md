@@ -1,7 +1,7 @@
 # Direction sampling
 
 ```{eval-rst}
-.. automodule:: sliced_committor.directions
+.. automodule:: sliced_committor.core.directions
    :members:
       DirectionSamplingConfig,
       sample_directions,

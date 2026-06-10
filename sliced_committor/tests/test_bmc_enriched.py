@@ -16,11 +16,11 @@ import pytest
 
 from sliced_committor import (
     EnrichedBMCRepresentationError,
+    build_committor,
     compute_basin_moment_weights,
     compute_enriched_basin_moment_weights,
     compute_enriched_basin_moment_weights_power,
     compute_sliced_committor,
-    evaluate_committor,
 )
 
 
@@ -63,7 +63,7 @@ def test_ebmc_shape_and_keys(fit):
 def test_ebmc_boundary_enforcement_at_samples(fit):
     samples, in_A, in_B, result = fit
     ebmc = compute_enriched_basin_moment_weights(result, samples)
-    q = evaluate_committor(result, samples, ebmc, in_A=in_A, in_B=in_B)
+    q = build_committor(result, ebmc)(samples, in_A=in_A, in_B=in_B)
     assert bool(jnp.all(q[in_A] == 0.0))
     assert bool(jnp.all(q[in_B] == 1.0))
 
@@ -123,7 +123,7 @@ def test_pesb_p2_improves_over_ebmc(fit):
 def test_pesb_evaluator_enforces_boundaries(fit):
     samples, in_A, in_B, result = fit
     pesb = compute_enriched_basin_moment_weights_power(result, samples, P=2)
-    q = evaluate_committor(result, samples, pesb, in_A=in_A, in_B=in_B)
+    q = build_committor(result, pesb)(samples, in_A=in_A, in_B=in_B)
     assert bool(jnp.all(q[in_A] == 0.0))
     assert bool(jnp.all(q[in_B] == 1.0))
 
@@ -131,7 +131,7 @@ def test_pesb_evaluator_enforces_boundaries(fit):
 def test_pesb_evaluator_clips_to_unit_interval(fit):
     samples, _, _, result = fit
     pesb = compute_enriched_basin_moment_weights_power(result, samples, P=2)
-    q = evaluate_committor(result, samples, pesb)
+    q = build_committor(result, pesb)(samples)
     # The evaluator clips its output to [0, 1] by default (clip=True).
     assert float(jnp.min(q)) >= 0.0
     assert float(jnp.max(q)) <= 1.0
@@ -161,5 +161,5 @@ def test_pesb_custom_n_values(fit):
         rtol=0,
         atol=1e-12,
     )
-    q = evaluate_committor(result, samples, pesb, in_A=in_A, in_B=in_B)
+    q = build_committor(result, pesb)(samples, in_A=in_A, in_B=in_B)
     assert q.shape == samples.shape[:1]

@@ -56,7 +56,7 @@ def test_rmse_decreases_with_n_directions(pde_and_samples):
             seed=2,
         )
         ebmc = sc.compute_enriched_basin_moment_weights(result, jnp.asarray(samples))
-        q_pred = np.asarray(sc.evaluate_committor(result, jnp.asarray(pts_int), ebmc))
+        q_pred = np.asarray(sc.build_committor(result, ebmc)(jnp.asarray(pts_int)))
         rmses.append(float(np.sqrt(np.mean((q_pred - q_true) ** 2))))
 
     # Strict monotone decrease across the three rungs we test. We allow a

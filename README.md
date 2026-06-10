@@ -51,8 +51,6 @@ Instead of solving the full committor PDE in d dimensions, the algorithm:
    basis with a smoothstep family `Ψ_n(v) = v^n / (v^n + (1-v)^n)` for
    additional resolving power on heterogeneous transitions. Diagonal RD
    and full-Gram simplex solvers remain available for compatibility.
-   Optional post-hoc affine / monotone calibration further refines the
-   estimate near the basins.
 
 ## Theory primer
 
@@ -110,27 +108,24 @@ does not pin one.
 import jax
 jax.config.update("jax_enable_x64", True)   # required for EBMC
 
-import jax.numpy as jnp
-from sliced_committor import (
-    compute_sliced_committor,
-    compute_enriched_basin_moment_weights,
-    evaluate_committor,
-)
+from sliced_committor import fit_committor
 
 # samples: (N, dim) array of configurations
 # in_A, in_B: (N,) bool arrays, basin labels
-result = compute_sliced_committor(
-    samples, in_A=in_A, in_B=in_B, n_directions=256,
+q = fit_committor(
+    samples, in_A=in_A, in_B=in_B,
+    weights="ebmc", n_directions=256,
 )
-ebmc = compute_enriched_basin_moment_weights(result, samples)
-q = evaluate_committor(
-    result, points, ebmc,
-    in_A=in_A_at_points, in_B=in_B_at_points,    # optional, for q=0/q=1 enforcement
-)
+
+# q is a callable committor; evaluate at new points
+# (optional q=0/q=1 boundary enforcement via the basin masks):
+q_vals = q(points, in_A=in_A_at_points, in_B=in_B_at_points)
 ```
 
-`evaluate_committor` autodetects the centered-basis (EBMC) result dict and
-routes to the affine-aware aggregator: `q̂(x) = c + Σ_j w_j q_{θ_j}(θ_j·x)`.
+`fit_committor` builds the slices, solves the EBMC weights, and returns a
+callable committor `q(points, *, in_A=None, in_B=None)` implementing the
+affine-aware aggregator `q̂(x) = c + Σ_j w_j q_{θ_j}(θ_j·x)`. For step-by-step
+control use `compute_sliced_committor` + a weight solver + `build_committor`.
 
 ## Recommended settings (cross-system consensus)
 
@@ -193,12 +188,12 @@ For heterogeneous transition regions, augment each per-slice basis with the
 smoothstep family `Ψ_n(v) = v^n / (v^n + (1−v)^n)` for `n ∈ n_values`:
 
 ```python
-from sliced_committor import compute_enriched_basin_moment_weights_power
+from sliced_committor import compute_enriched_basin_moment_weights_power, build_committor
 
 pesb = compute_enriched_basin_moment_weights_power(
     result, samples, P=2,                # n_values defaults to [1.0, 2.0]
 )
-q = evaluate_committor(result, points, pesb)
+q = build_committor(result, pesb)        # callable committor; q(points)
 print("Dirichlet improvement over plain EBMC:", pesb["improvement_over_ebmc"])
 ```
 
@@ -264,17 +259,39 @@ weight functions and ε estimators consume. Call this if you want to invoke
 a weight function directly (`corrected_dirichlet_inv_rd(ctx)`) rather than
 via `compute_weights_multi`.
 
-## Calibration
+## Reaction rates
+
+The `sliced_committor.rates` subpackage turns a fitted committor into reaction
+rates and transport coefficients along the committor coordinate:
 
 ```python
-from sliced_committor.calibration import (
-    calibrate_weights_affine,        # affine label-mean (centered basis)
-    compute_affine_calibration,      # ABC_v2 global affine
-    apply_affine,
-    evaluate_committor_calibrated,
-    compute_recalibration_curve,     # 1D-RD recalibration along q̄
-    apply_recalibration,
-    evaluate_committor_with_recal,
+from sliced_committor import fit_committor, committor_rate
+
+q = fit_committor(samples, in_A=in_A, in_B=in_B, weights="ebmc")
+rate = committor_rate(
+    q, samples, trajectory, dt=dt, reduction="harmonic",
+    sample_weights=w, window_ids=window_ids, in_A=in_A, in_B=in_B,
+)
+print(rate["k_AB"], rate["k_BA"])      # rates in 1/dt units
+```
+
+`committor_rate` is the coordinate-invariant estimator: every rate is a
+functional of the pair `{D_q(q), π(q)}` (committor-coordinate diffusion +
+equilibrium density), with the local reactive flux `ν_R(q) = D_q(q)·π(q)`. The
+`reduction` selects the functional: `harmonic` (the 1D-Smoluchowski MFPT,
+default), `plateau` (TPT flux), `arithmetic` (the Dirichlet form), or `local`.
+For the exact committor `D_q·π` is constant and all agree; the spread on an
+approximate committor is a quality diagnostic.
+
+```python
+from sliced_committor import (
+    committor_rate,            # coordinate-invariant {D_q, π} reductions (recommended)
+    berezhkovskii_szabo_rate,  # named MFPT / local-D(q*) alias of committor_rate
+    dirichlet_rate, tpt_rate,  # feature-space forms (take a length-scale D)
+    kramers_rate,              # overdamped Kramers barrier crossing
+    density, diffusion_coefficient, reactive_flux,   # the underlying quantities
+    saddle_bridge_D,           # calibrated configurational D for the feature-space forms
+    find_plateau,              # automatic flux-flatness plateau
 )
 ```
 
@@ -283,8 +300,8 @@ from sliced_committor.calibration import (
 The committor is β-invariant given fixed samples: the algorithm computes
 `F = -(1/β) log ρ` from histogram density, then uses `ρ = exp(-β(F - F_min))`
 internally; the two β's cancel. Verified numerically across every downstream
-output (committors, all weight solvers, all ε estimators, calibration,
-recalibration). Including β in the API would be misleading; the library uses
+output (committors, all weight solvers, all ε estimators, and the rate
+estimators). Including β in the API would be misleading; the library uses
 β = 1 internally so `result.free_energies` stores `-log ρ` directly. Multiply
 by `1/β_physical` to recover physical-units free energy.
 

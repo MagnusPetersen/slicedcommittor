@@ -1,4 +1,4 @@
-# slicedcommittor
+# sliced-committor
 
 Sample-based committor function approximation via 1D projections. Given
 samples and basin labels, the library returns the committor `q(x)`: the
@@ -23,17 +23,10 @@ changelog
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from sliced_committor import (
-    compute_sliced_committor,
-    compute_enriched_basin_moment_weights,
-    evaluate_committor,
-)
+from sliced_committor import fit_committor
 
-result = compute_sliced_committor(
-    samples, in_A=in_A, in_B=in_B, n_directions=256,
-)
-ebmc = compute_enriched_basin_moment_weights(result, samples)
-q = evaluate_committor(result, points, ebmc)
+q = fit_committor(samples, in_A=in_A, in_B=in_B, weights="ebmc", n_directions=256)
+q_vals = q(points)   # q is a callable
 ```
 
 See [quickstart.md](quickstart.md) for the full path. The [theory primer](theory.md)

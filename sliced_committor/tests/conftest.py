@@ -1,4 +1,4 @@
-"""Shared fixtures and JAX setup for the slicedcommittor test suite."""
+"""Shared fixtures and JAX setup for the sliced-committor test suite."""
 
 import os
 

@@ -14,11 +14,11 @@ import pytest
 
 from sliced_committor import (
     DirectionSamplingConfig,
+    build_committor,
     compute_enriched_basin_moment_weights,
     compute_sliced_committor,
     directions_gcpca,
     directions_pca,
-    evaluate_committor,
     gcpca_basis,
     pca_basis,
     sample_directions,
@@ -163,6 +163,6 @@ def test_geometric_mode_end_to_end_with_ebmc(cluster_samples, mode):
         direction_sampling=cfg,
     )
     ebmc = compute_enriched_basin_moment_weights(r, X)
-    q = evaluate_committor(r, X, ebmc, in_A=in_A, in_B=in_B)
+    q = build_committor(r, ebmc)(X, in_A=in_A, in_B=in_B)
     assert bool(jnp.all(q[:50] == 0.0))
     assert bool(jnp.all(q[-50:] == 1.0))

@@ -19,7 +19,7 @@ Pinning the JAX version is recommended for downstream regression suites
 that want bit-exact reproducibility:
 
 ```toml
-dependencies = ["slicedcommittor==0.4.0", "jax==0.4.30"]
+dependencies = ["sliced-committor==0.4.0", "jax==0.4.30"]
 ```
 
 If you observe drift larger than the bands above, please open an issue

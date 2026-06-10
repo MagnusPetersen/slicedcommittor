@@ -1,7 +1,7 @@
 # Weight solvers and epsilon estimators
 
 ```{eval-rst}
-.. automodule:: sliced_committor.weights
+.. automodule:: sliced_committor.core.weights
    :members:
       corrected_dirichlet_inv_rd,
       full_gram_weights,
@@ -12,12 +12,12 @@
       get_all_weight_functions,
       get_default_weight_functions
 
-.. automodule:: sliced_committor._bmc
+.. automodule:: sliced_committor.core._bmc
    :members:
       basin_moment_weights,
       BMCRepresentationError
 
-.. automodule:: sliced_committor._bmc_enriched
+.. automodule:: sliced_committor.core._bmc_enriched
    :members:
       enriched_basin_moment_weights,
       enriched_basin_moment_weights_power,

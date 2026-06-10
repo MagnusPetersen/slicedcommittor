@@ -39,7 +39,7 @@ Pipeline:
 
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -254,7 +254,7 @@ class WeightingContext(NamedTuple):
         n_directions, n_bins: counts; informational.
         projected_samples: (M, N) only when ``store_projected_samples=True``
             in :func:`compute_sliced_committor`. Required by the full-Gram
-            and BMC solvers and by affine calibration.
+            and BMC solvers.
         log_dirichlet: (M,) ``log(D_j[q_j])``; populated by the fused-diagnostic
             path inside :func:`compute_sliced_committor`.
         boundary_errors: (M,) cached equilibrium ε. Reused by
@@ -1386,7 +1386,7 @@ def _evaluate_centered_from_qall(q_all, w, c, q_bar, valid_mask, original_shape)
     Bypasses the sum-to-one normalisation used by the log-space evaluator;
     centered-basis weights are in absolute units rather than convex
     coefficients. Per-slice committors are clipped to ``[0, 1]`` before
-    centring (matches the pre-affine clipping in the legacy evaluator).
+    centring (matches the per-slice clip applied in the other paths).
     """
     w_eff = w * valid_mask.astype(w.dtype)
     q_clip = jnp.clip(q_all, 0.0, 1.0)
@@ -1422,74 +1422,6 @@ def _evaluate_powered_smoothstep_from_qall(
     return (c + contrib).reshape(original_shape)
 
 
-@partial(jit, static_argnames=("original_shape",))
-def _evaluate_committor_adaptive(
-    directions,
-    s_coords,
-    q_1d,
-    sign_w,
-    log_abs_w,
-    valid_mask,
-    boundary_indices,
-    points_flat,
-    min_transition_fraction,
-    original_shape,
-):
-    """Adaptive halo correction: exclude clamped directions per query point.
-
-    For each point x and direction j, classifies whether x projects inside
-    A's boundary (q clamped to 0) or B's boundary (q clamped to 1).
-    Re-normalizes over only the "transition" directions where the 1D solver
-    computed an interior value, correcting for boundary inflation in high-d.
-
-    Correction formula:
-        q_corrected(x) = (q_raw(x) - f_B(x)) / (1 - f_A(x) - f_B(x))
-    where f_A, f_B are the weight fractions of clamped directions.
-    """
-    sign_w_norm, log_abs_w_norm = _normalize_log_space_weights(sign_w, log_abs_w, valid_mask)
-
-    # Extract boundary s-values per direction
-    M = directions.shape[0]
-    a_idxs = boundary_indices[:, 0]
-    b_idxs = boundary_indices[:, 1]
-    s_a = s_coords[jnp.arange(M), a_idxs]  # (M,)
-    s_b = s_coords[jnp.arange(M), b_idxs]  # (M,)
-
-    def _single_direction(theta, s_grid, q_grid, s_a_val, s_b_val):
-        s = points_flat @ theta  # (N_pts,)
-        q_vals = _interp_1d_at_samples(s_grid, q_grid, s)
-        in_A_shadow = s <= s_a_val  # (N_pts,) bool
-        in_B_shadow = s >= s_b_val
-        return q_vals, in_A_shadow, in_B_shadow
-
-    q_all, inA_all, inB_all = vmap(_single_direction, in_axes=(0, 0, 0, 0, 0))(
-        directions, s_coords, q_1d, s_a, s_b
-    )
-
-    # Weighted committor: log-space signed reduction.
-    q_raw = _weighted_sum_over_directions(sign_w_norm, log_abs_w_norm, q_all)
-
-    # f_A, f_B are Σ_j ŵ_j · 1[s ≤ s_a]; the indicator zeros out contributions
-    # from directions where x is outside the shadow (sign → 0).
-    def _indicator_sum(indicator):
-        # (M, N_pts) of {0, 1}: mask sign_w by indicator.
-        sgn = sign_w_norm[:, None] * indicator.astype(sign_w_norm.dtype)
-        logabs = jnp.broadcast_to(log_abs_w_norm[:, None], indicator.shape)
-        sgn_sum, log_abs_sum = signed_logsumexp(sgn, logabs, axis=0)
-        return sgn_sum * jnp.exp(log_abs_sum)
-
-    f_A = _indicator_sum(inA_all)
-    f_B = _indicator_sum(inB_all)
-    f_T = jnp.maximum(1.0 - f_A - f_B, 0.0)
-
-    # Correct: q = (q_raw - f_B) / f_T, with fallback when f_T is small
-    q_corr = (q_raw - f_B) / jnp.maximum(f_T, 1e-10)
-    q_corr = jnp.clip(q_corr, 0.0, 1.0)
-    q_result = jnp.where(f_T >= min_transition_fraction, q_corr, q_raw)
-
-    return q_result.reshape(original_shape)
-
-
 def evaluate_committor(
     result: SlicedCommittorResult,
     points: jnp.ndarray,
@@ -1499,13 +1431,8 @@ def evaluate_committor(
     in_A: jnp.ndarray | None = None,
     in_B: jnp.ndarray | None = None,
     rescale_transition: bool = False,
-    adaptive_boundary_correction: bool = False,
-    min_transition_fraction: float = 0.1,
     use_stored_projections: bool = False,
     clip: bool = True,
-    affine_correction: bool = False,
-    affine_calibration: Any | None = None,
-    affine_clip: bool = True,
 ) -> jnp.ndarray:
     """
     Evaluate weighted sliced committor at given points.
@@ -1531,36 +1458,12 @@ def evaluate_committor(
         rescale_transition: If True, affine-rescale the transition region
             (outside both states) so that its min maps to 0 and max to 1.
             Corrects range compression from weighted averaging.
-        adaptive_boundary_correction: **Deprecated (ABC v1)**, per-query
-            Hájek ratio that excludes directions where the query falls in a
-            state's projected shadow. Assumes independent per-direction
-            noise; fails under structured direction sampling combined with
-            non-trivial weights. Pass ``affine_correction=True`` (ABC_v2)
-            instead. Triggers a ``DeprecationWarning`` when True.
-        min_transition_fraction: Minimum fraction of weight in transition
-            directions to apply the adaptive correction (default 0.1).
-            Below this, falls back to the uncorrected value.
         use_stored_projections: If True and result.projected_samples is
             available, skip the M×dim×N projection matmul and use stored
             (M, N) projections directly. Only valid when evaluating at the
             same samples used in compute_sliced_committor.
         clip: If True (default), clip the per-point output to [0, 1] before
-            the affine correction and BC clamping.
-        affine_correction: If True, apply the ABC_v2 affine basin-condition
-            correction ``q̂(x) = α·q_raw(x) + β`` globally, where ``α, β``
-            are chosen so that ``E_A[q̂]=0`` and ``E_B[q̂]=1`` in sample
-            expectation. If ``adaptive_boundary_correction`` is also True,
-            the calibration is taken on the ABC v1 output (the spec's
-            ``affine ∘ ABC`` composition). Requires raw-array weights;
-            centered-basis dicts must use
-            ``sliced_committor.calibration.affine.calibrate_weights_affine``.
-        affine_calibration: Pre-computed ``AffineCalibration`` named-tuple
-            from ``sliced_committor.calibration.abc.compute_affine_calibration``. If None
-            and ``affine_correction=True``, the calibration is computed
-            via the calibration submodule.
-        affine_clip: If True (default), clip the post-affine values to
-            ``[0, 1]`` before BC clamping. The committor is a probability,
-            so this is a hard physical bound, not a hyperparameter.
+            BC clamping.
 
     Returns:
         Committor values with shape points.shape[:-1]
@@ -1625,11 +1528,6 @@ def evaluate_committor(
 
     if is_pesb_smoothstep:
         # PESB-EBMC path: powered slice basis (Ψ_n family) with EBMC bias.
-        if adaptive_boundary_correction:
-            raise NotImplementedError(
-                "adaptive_boundary_correction is not supported with "
-                "PESB-EBMC weights. Use raw-array weights for ABC v1."
-            )
         if use_stored_projections and result.projected_samples is not None:
             q_all = _qall_stored(s_coords, q_1d, result.projected_samples)
         else:
@@ -1645,15 +1543,8 @@ def evaluate_committor(
         _legacy_dispatch_done = True
     elif is_centered_basis:
         # Affine-ansatz path: weights are in absolute units (not convex). Skip
-        # the sum-to-one log-space normalization and the legacy adaptive /
-        # batched paths; those mix poorly with the additive intercept.
-        if adaptive_boundary_correction:
-            raise NotImplementedError(
-                "adaptive_boundary_correction is not supported with "
-                "centered-basis weights. Use ABC_v2 "
-                "(`affine_correction=True`) with raw-array weights instead "
-                "(see sliced_committor.calibration.abc)."
-            )
+        # the sum-to-one log-space normalization and the legacy batched
+        # path; those mix poorly with the additive intercept.
         if use_stored_projections and result.projected_samples is not None:
             q_all = _qall_stored(s_coords, q_1d, result.projected_samples)
         else:
@@ -1674,113 +1565,11 @@ def evaluate_committor(
 
     if _legacy_dispatch_done:
         pass  # q_result already populated by the centered-basis or PESB path.
-    else:
-        # Normalize weights in log-space once (shared across the legacy paths).
-        sign_w_norm, log_abs_w_norm = _normalize_log_space_weights(sign_w, log_abs_w, valid_mask)
-    if _legacy_dispatch_done:
-        pass
-    elif adaptive_boundary_correction:
-        import warnings
-
-        warnings.warn(
-            "adaptive_boundary_correction (ABC v1) is deprecated in favour "
-            "of the affine basin-condition correction (ABC_v2). Pass "
-            "`affine_correction=True` (with `affine_calibration=...` from "
-            "sliced_committor.calibration.abc.compute_affine_calibration) instead. "
-            "ABC v1 will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Adaptive halo correction: single-pass with boundary classification
-        boundary_indices = result.boundary_indices
-
-        if batch_size is not None and batch_size < n_directions:
-            # Batched adaptive path: accumulate (sign, log_abs) running pairs
-            # across batches using an online signed_logsumexp merge.
-            M = directions.shape[0]
-            a_idxs = boundary_indices[:, 0]
-            b_idxs = boundary_indices[:, 1]
-            s_a = s_coords[jnp.arange(M), a_idxs]
-            s_b = s_coords[jnp.arange(M), b_idxs]
-
-            n_pts = points_flat.shape[0]
-            # Running signed log-space accumulators, initialized to zero.
-            sgn_q = jnp.zeros(n_pts)
-            log_q = jnp.full(n_pts, -jnp.inf)
-            sgn_fA = jnp.zeros(n_pts)
-            log_fA = jnp.full(n_pts, -jnp.inf)
-            sgn_fB = jnp.zeros(n_pts)
-            log_fB = jnp.full(n_pts, -jnp.inf)
-
-            for start in range(0, n_directions, batch_size):
-                end = min(start + batch_size, n_directions)
-
-                def _single_adaptive(theta, s_grid, q_grid, sa, sb):
-                    s = points_flat @ theta
-                    q_vals = _interp_1d_at_samples(s_grid, q_grid, s)
-                    return q_vals, (s <= sa), (s >= sb)
-
-                q_b, inA_b, inB_b = vmap(_single_adaptive, in_axes=(0, 0, 0, 0, 0))(
-                    directions[start:end],
-                    s_coords[start:end],
-                    q_1d[start:end],
-                    s_a[start:end],
-                    s_b[start:end],
-                )
-
-                sgn_w_b = sign_w_norm[start:end]
-                log_w_b = log_abs_w_norm[start:end]
-
-                # Weighted committor contribution for this batch.
-                sgn_q_b = sgn_w_b[:, None] * jnp.sign(q_b)
-                log_q_b = log_w_b[:, None] + jnp.where(
-                    jnp.abs(q_b) > 0, jnp.log(jnp.abs(q_b)), -jnp.inf
-                )
-                sgn_q_batch, log_q_batch = signed_logsumexp(sgn_q_b, log_q_b, axis=0)
-
-                # Indicator sums (shadow weight fractions).
-                sgn_fA_b = sgn_w_b[:, None] * inA_b.astype(sgn_w_b.dtype)
-                log_fA_b = jnp.broadcast_to(log_w_b[:, None], inA_b.shape)
-                sgn_fA_batch, log_fA_batch = signed_logsumexp(sgn_fA_b, log_fA_b, axis=0)
-
-                sgn_fB_b = sgn_w_b[:, None] * inB_b.astype(sgn_w_b.dtype)
-                log_fB_b = jnp.broadcast_to(log_w_b[:, None], inB_b.shape)
-                sgn_fB_batch, log_fB_batch = signed_logsumexp(sgn_fB_b, log_fB_b, axis=0)
-
-                # Merge with running accumulators.
-                sgn_q, log_q = signed_logsumexp(
-                    jnp.stack([sgn_q, sgn_q_batch]), jnp.stack([log_q, log_q_batch]), axis=0
-                )
-                sgn_fA, log_fA = signed_logsumexp(
-                    jnp.stack([sgn_fA, sgn_fA_batch]), jnp.stack([log_fA, log_fA_batch]), axis=0
-                )
-                sgn_fB, log_fB = signed_logsumexp(
-                    jnp.stack([sgn_fB, sgn_fB_batch]), jnp.stack([log_fB, log_fB_batch]), axis=0
-                )
-
-            q_sum = sgn_q * jnp.exp(log_q)
-            fA_sum = sgn_fA * jnp.exp(log_fA)
-            fB_sum = sgn_fB * jnp.exp(log_fB)
-            f_T = jnp.maximum(1.0 - fA_sum - fB_sum, 0.0)
-            q_corr = (q_sum - fB_sum) / jnp.maximum(f_T, 1e-10)
-            q_corr = jnp.clip(q_corr, 0.0, 1.0)
-            q_result = jnp.where(f_T >= min_transition_fraction, q_corr, q_sum)
-            q_result = q_result.reshape(original_shape)
-        else:
-            q_result = _evaluate_committor_adaptive(
-                directions,
-                s_coords,
-                q_1d,
-                sign_w,
-                log_abs_w,
-                valid_mask,
-                boundary_indices,
-                points_flat,
-                min_transition_fraction,
-                original_shape,
-            )
     elif batch_size is not None and batch_size < n_directions:
         # Batched non-adaptive path: running signed-logsumexp accumulator.
+        # The normalised log-space weights are consumed only here; the unbatched
+        # path below re-normalises internally in _evaluate_logspace_from_qall.
+        sign_w_norm, log_abs_w_norm = _normalize_log_space_weights(sign_w, log_abs_w, valid_mask)
         n_pts = points_flat.shape[0]
         sgn_q = jnp.zeros(n_pts)
         log_q = jnp.full(n_pts, -jnp.inf)
@@ -1827,33 +1616,6 @@ def evaluate_committor(
     # range of individual 1D committors.
     if clip:
         q_result = jnp.clip(q_result, 0.0, 1.0)
-
-    # ABC_v2 affine basin-condition correction. Applied after `clip` (matches
-    # what compute_affine_calibration sees during calibration) and before BC
-    # clamping (BC pins basin samples to {0, 1} which would override the
-    # affine rescale; affine handles BCs in expectation already).
-    if affine_correction:
-        if is_centered_basis:
-            raise ValueError(
-                "affine_correction is not supported with centered-basis "
-                "weight dicts. Use "
-                "sliced_committor.calibration.calibrate_weights_affine to "
-                "fold the affine into the centered basis instead."
-            )
-        if affine_calibration is None:
-            raise ValueError(
-                "affine_correction=True requires an explicit "
-                "affine_calibration (compute it via "
-                "sliced_committor.calibration.compute_affine_calibration)."
-            )
-        from .calibration.abc import apply_affine
-
-        q_result = apply_affine(
-            q_result,
-            affine_calibration.alpha,
-            affine_calibration.beta,
-            clip=affine_clip,
-        )
 
     if enforce_boundary_conditions and (in_A is not None or in_B is not None):
         mask_A = (
@@ -1953,6 +1715,11 @@ def compute_full_gram_weights(
         tikhonov: Gram matrix regularisation. Float or ``'auto'`` (default,
             N_eff-adaptive: η = 1/√N_eff, clamped at 1e-12).
         constraint: ``'sum'`` (Σw=1, default) or ``'flux'`` (bᵀw=1).
+        clamp_epsilon: if True, clamp the boundary-error ε into ``[0, 1]``
+            before forming ``b``. Default False (negative/over-unity ε are
+            left as-is, matching the diagonal estimator).
+        return_overlap: if True, also assemble and return the (M, M) slice
+            L² overlap matrix under key ``'M'``. Default False.
         gram_dtype: dtype for the dominant (M, N)×(N, M) inner product.
             Default ``'float32'`` (matmul in single precision, solve in
             double); pass ``'float64'`` for the legacy bit-equivalent path.
@@ -2009,7 +1776,7 @@ def compute_basin_moment_weights(
         μ_A[q̂] = 0,   μ_B[q̂] = 1
 
     which encode the committor's boundary values directly into the
-    optimisation rather than relying on a post-hoc affine fix.
+    optimisation rather than relying on a post-hoc correction.
     Constants are infeasible (rank-1 constraint matrix); near-constant
     slices receive algebraic zero weight. The optimum is a closed-form 2×2
     KKT solve on top of a single Cholesky factor of the regularised Gram;
@@ -2041,6 +1808,8 @@ def compute_basin_moment_weights(
             distinguish basins A and B).
         cond_basin_threshold: Threshold below which BMC is considered
             ill-posed. Default 1e-6.
+        gram_dtype: dtype for the dominant ``(M, N)×(N, M)`` inner product.
+            Default ``'float64'``.
 
     Returns:
         dict with keys:
