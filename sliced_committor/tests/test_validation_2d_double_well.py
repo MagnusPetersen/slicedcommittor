@@ -189,7 +189,7 @@ def test_sliced_matches_pde_double_well(pde_reference, sliced_samples):
     )
     pts_int = pts[interior_mask]
 
-    q_pred = np.asarray(sc.evaluate_committor(result, jnp.asarray(pts_int), ebmc))
+    q_pred = np.asarray(sc.build_committor(result, ebmc)(jnp.asarray(pts_int)))
     q_true = _interpolate_pde(q_grid, X, Y, pts_int)
 
     rmse = float(np.sqrt(np.mean((q_pred - q_true) ** 2)))

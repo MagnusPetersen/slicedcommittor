@@ -1,4 +1,4 @@
-"""Sphinx configuration for slicedcommittor docs."""
+"""Sphinx configuration for sliced-committor docs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import sliced_committor  # noqa: E402
 
 # -- Project information -----------------------------------------------------
 
-project = "slicedcommittor"
+project = "sliced-committor"
 author = "Magnus Petersen"
 copyright = "2026, Magnus Petersen"
 release = sliced_committor.__version__
@@ -65,7 +65,7 @@ intersphinx_mapping = {
 
 html_theme = "furo"
 html_static_path = ["_static"]
-html_title = f"slicedcommittor v{release}"
+html_title = f"sliced-committor v{release}"
 
 # Avoid warnings on missing intersphinx targets in CI.
 nitpicky = False

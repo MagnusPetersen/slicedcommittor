@@ -11,7 +11,7 @@ $$
 \qquad q|_A = 0,\ q|_B = 1.
 $$
 
-For $d \gtrsim 5$ a direct grid solve is infeasible. The slicedcommittor
+For $d \gtrsim 5$ a direct grid solve is infeasible. The sliced-committor
 method replaces the high-dimensional solve with $M$ one-dimensional solves.
 
 ## The sliced approach

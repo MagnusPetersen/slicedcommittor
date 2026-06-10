@@ -5,32 +5,27 @@ than imports the upstream module.
 """
 
 import jax
-import jax.numpy as jnp
-import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
 from sliced_committor import EnrichedBMCRepresentationError  # for parallel error type
-from sliced_committor._bmc import BMCRepresentationError
+from sliced_committor.core._bmc import BMCRepresentationError
+
+from ._helpers import TOL_SOLVER, two_basin_samples
 
 
 def _make_samples(n=600, seed=0):
-    rng = np.random.default_rng(seed)
-    samples = jnp.asarray(rng.standard_normal((n, 2)))
-    in_A = jnp.linalg.norm(samples - jnp.asarray([-2.0, 0.0]), axis=1) < 0.7
-    in_B = jnp.linalg.norm(samples - jnp.asarray([2.0, 0.0]), axis=1) < 0.7
-    in_A = in_A & ~in_B
-    return samples, in_A, in_B
+    return two_basin_samples(n, seed=seed)
 
 
 def test_bmc_constraint_residuals_machine_epsilon():
     samples, in_A, in_B = _make_samples()
     result = sc.compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=24, seed=0)
     out = sc.compute_basin_moment_weights(result, samples)
-    assert out["constraint_residual_A"] < 1e-6
-    assert out["constraint_residual_B"] < 1e-6
+    assert out["constraint_residual_A"] < TOL_SOLVER
+    assert out["constraint_residual_B"] < TOL_SOLVER
 
 
 def test_bmc_returns_solver_provenance():

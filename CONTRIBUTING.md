@@ -1,13 +1,13 @@
-# Contributing to slicedcommittor
+# Contributing to sliced-committor
 
 Thanks for your interest. The library is small and welcomes focused improvements.
 
 ## Development setup
 
-Clone the repo, then install in editable mode with all dev extras:
+Clone the monorepo, then install the library in editable mode with all dev extras:
 
 ```bash
-pip install -e .[dev]
+pip install -e ./lib[dev]
 ```
 
 This pulls test (pytest, pytest-cov), docs (sphinx, furo, myst-parser,
@@ -17,19 +17,20 @@ jupyter) dependencies.
 Activate pre-commit so style is enforced locally:
 
 ```bash
+cd lib
 pre-commit install
 ```
 
 ## Running the test suite
 
 ```bash
-pytest sliced_committor/tests -v
+pytest lib/sliced_committor/tests -v
 ```
 
 For coverage:
 
 ```bash
-pytest sliced_committor/tests --cov=sliced_committor --cov-report=term-missing
+pytest lib/sliced_committor/tests --cov=sliced_committor --cov-report=term-missing
 ```
 
 The full suite includes validation tests against the 1D Ornstein-Uhlenbeck
@@ -39,20 +40,20 @@ smoke tests. Filter with `pytest -k "not validation"` when iterating locally.
 ## Lint and format
 
 ```bash
-ruff check sliced_committor
-ruff format sliced_committor
+ruff check lib/sliced_committor
+ruff format lib/sliced_committor
 ```
 
-Configuration lives in `pyproject.toml` under `[tool.ruff]`.
+Configuration lives in `lib/pyproject.toml` under `[tool.ruff]`.
 
 ## Building the docs
 
 ```bash
-cd docs
+cd lib/docs
 make html
 ```
 
-Output goes to `docs/_build/html/`.
+Output goes to `lib/docs/_build/html/`.
 
 ## Style rules
 
@@ -63,7 +64,7 @@ A few project-local conventions:
    New code that touches the Gram solvers should check this at the public-API
    boundary and raise a clear `ValueError` if missing.
 
-2. **No em dashes in committed text.** Replace with `:`, `,`, `;`, or a period
+2. **No em dashes in committed text.** Replace `:`, `,`, `;`, or a period
    depending on the cadence. A pre-commit hook rejects U+2014 in staged files.
    The only exception is author-list-style separators (`Name : Affiliation`).
 
@@ -77,8 +78,11 @@ A few project-local conventions:
    their own data. Examples must be self-contained (synthetic samples,
    analytical references) and never require external downloads.
 
+6. **Tests should not depend on the main monorepo.** When porting an assertion
+   from `tests/` at the monorepo root, copy the math; do not import.
+
 ## Submitting changes
 
-The repository is private during the initial collaboration. Open pull requests
-against `main`; CI runs lint, the test matrix (Python 3.10/3.11/3.12), and the
-docs build automatically.
+The remote does not exist yet; until it does, please share patches via email
+or by appending to the local monorepo. Once a public GitHub remote is set up,
+issue and PR templates will be added and this section will be expanded.

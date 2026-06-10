@@ -9,14 +9,11 @@ jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
 
+from ._helpers import two_basin_samples
+
 
 def _make_samples(n=500, seed=0):
-    rng = np.random.default_rng(seed)
-    samples = jnp.asarray(rng.standard_normal((n, 3)))
-    in_A = jnp.linalg.norm(samples - jnp.asarray([-2.0, 0.0, 0.0]), axis=1) < 0.7
-    in_B = jnp.linalg.norm(samples - jnp.asarray([2.0, 0.0, 0.0]), axis=1) < 0.7
-    in_A = in_A & ~in_B
-    return samples, in_A, in_B
+    return two_basin_samples(n, dim=3, seed=seed)
 
 
 def test_seed_reproducibility():
@@ -44,7 +41,7 @@ def test_store_projected_samples_false_diagonal_works():
     weights = sc.compute_weights_multi(result, [sc.corrected_dirichlet_inv_rd])
     assert weights["corrected_dirichlet_inv_rd"].shape == (16,)
     # Diagonal evaluation works with on-the-fly projection.
-    q = sc.evaluate_committor(result, samples[:50], weights["corrected_dirichlet_inv_rd"])
+    q = sc.build_committor(result, weights["corrected_dirichlet_inv_rd"])(samples[:50])
     assert q.shape == (50,)
 
 
@@ -99,12 +96,12 @@ def test_summarize_gram_diagnostics_rejects_array():
 
 
 def test_evaluate_committor_dict_dispatch():
-    """The EBMC result dict is auto-detected by evaluate_committor."""
+    """The EBMC result dict is auto-detected by build_committor."""
     samples, in_A, in_B = _make_samples()
     result = sc.compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=24, seed=3)
     ebmc = sc.compute_enriched_basin_moment_weights(result, samples)
     # Dict route.
-    q_dict = sc.evaluate_committor(result, samples[:30], ebmc)
+    q_dict = sc.build_committor(result, ebmc)(samples[:30])
     # Manual route via raw weights + bias (centered basis: q̂(x) = c + Σ w_j q_j).
     # Confirm both paths produce equivalent output (within float noise).
     assert q_dict.shape == (30,)

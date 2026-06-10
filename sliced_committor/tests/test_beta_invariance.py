@@ -2,9 +2,9 @@
 
 The library dropped the explicit β argument because β cancels in every
 downstream computation (see ``audit/verify_beta_invariance.py``). This
-test loads the frozen golden reference (committors, weights, ε estimators,
-calibration, recalibration) computed by the monorepo at β=1 and asserts
-that the new label-only API reproduces every output to machine precision.
+test loads the frozen golden reference (committors, weights, ε estimators)
+computed by the monorepo at β=1 and asserts that the new label-only API
+reproduces every output to machine precision.
 """
 
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from sliced_committor import (
+    build_committor,
     compute_basin_moment_weights,
     compute_epsilon_equilibrium,
     compute_epsilon_flux1d,
@@ -19,7 +20,6 @@ from sliced_committor import (
     compute_full_gram_weights,
     compute_sliced_committor,
     compute_weights_multi,
-    evaluate_committor,
     get_all_weight_functions,
     make_weighting_context,
 )
@@ -94,13 +94,11 @@ def test_full_gram_weights_match_golden(fitted, golden_data):
     samples, _, _, result = fitted
     gram = compute_full_gram_weights(result, samples)
     # Full-Gram solver involves a Cholesky+matmul cascade. The output drifts
-    # by O(1%) across JAX / BLAS versions because the Cholesky kernel
-    # itself differs. The goldens were captured on Linux x86_64 + JAX 0.4.30 +
-    # MKL; CI's runner gets a different combination. Tolerances are tuned
-    # so cross-environment drift is silently absorbed but any real
-    # algorithmic change (which typically moves weights 10%+) still
-    # trips the test. See the tighter tests on committors_1d and the
-    # diagonal weights for the β-invariance contract.
+    # by O(1%) across JAX / BLAS versions because the Cholesky kernel itself
+    # differs; CI runners get a different combination than the golden capture.
+    # Tolerances absorb cross-environment drift while any real algorithmic
+    # change (which moves weights 10%+) still trips the test. The algorithm
+    # itself is β-invariant; see the tighter committors_1d / diagonal tests.
     _allclose(gram["w"], golden_data["w_gram::w"], "full_gram w", rtol=5e-2, atol=5e-2)
 
 
@@ -125,10 +123,8 @@ def test_q_at_samples_matches_golden(fitted, golden_data):
     # The golden snapshot was computed with the monorepo's auto-enforcement
     # of q=0/q=1 at basin samples. The library doesn't auto-enforce anymore;
     # pass labels explicitly to reproduce that behaviour.
-    q = evaluate_committor(
-        result,
+    q = build_committor(result, w["corrected_dirichlet_inv_rd"])(
         samples,
-        w["corrected_dirichlet_inv_rd"],
         in_A=in_A,
         in_B=in_B,
     )

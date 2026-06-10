@@ -3,7 +3,13 @@ name: lint
 on:
   push:
     branches: [main]
+    paths:
+      - "lib/**"
+      - ".github/workflows/lint.yml"
   pull_request:
+    paths:
+      - "lib/**"
+      - ".github/workflows/lint.yml"
 
 jobs:
   ruff:
@@ -21,24 +27,25 @@ jobs:
           pip install ruff>=0.5
 
       - name: ruff check
+        working-directory: lib
         run: ruff check sliced_committor
 
       - name: ruff format (check)
+        working-directory: lib
         run: ruff format --check sliced_committor
 
   em-dash:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Reject em dashes in committed text
+      - name: Reject em dashes in lib/
         run: |
           set -e
           # U+2014 (EM DASH) is forbidden in committed text. Encode as
           # \xe2\x80\x94 so this workflow file itself stays free of one.
-          if grep -rnP "\xe2\x80\x94" sliced_committor/ docs/ examples/ \
-              README.md CONTRIBUTING.md CHANGELOG.md \
+          if grep -rnP "\xe2\x80\x94" lib/ \
               --include='*.py' --include='*.md' --include='*.rst' \
-              --include='*.yaml' --include='*.yml' --include='*.toml' 2>/dev/null; then
+              --include='*.yaml' --include='*.yml' --include='*.toml'; then
             echo "::error::Em dashes (U+2014) are not allowed in committed text."
             exit 1
           fi

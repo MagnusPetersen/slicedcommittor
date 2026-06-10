@@ -1,4 +1,4 @@
-"""Shared low-level helpers used by solver, weights, and calibration."""
+"""Shared low-level helpers used by solver and weights."""
 
 from functools import partial
 

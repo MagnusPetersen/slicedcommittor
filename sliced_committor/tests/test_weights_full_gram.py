@@ -8,16 +8,13 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
-from sliced_committor.weights import compute_epsilon_rms
+from sliced_committor.core.weights import compute_epsilon_rms
+
+from ._helpers import TOL_SOLVER, two_basin_samples
 
 
 def _make_samples(n=500, seed=0):
-    rng = np.random.default_rng(seed)
-    samples = jnp.asarray(rng.standard_normal((n, 2)))
-    in_A = jnp.linalg.norm(samples - jnp.asarray([-2.0, 0.0]), axis=1) < 0.7
-    in_B = jnp.linalg.norm(samples - jnp.asarray([2.0, 0.0]), axis=1) < 0.7
-    in_A = in_A & ~in_B
-    return samples, in_A, in_B
+    return two_basin_samples(n, seed=seed)
 
 
 def test_full_gram_returns_simplex_constraint():
@@ -25,7 +22,7 @@ def test_full_gram_returns_simplex_constraint():
     result = sc.compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=24, seed=0)
     out = sc.compute_full_gram_weights(result, samples)
     assert "w" in out
-    np.testing.assert_allclose(float(np.asarray(out["w"]).sum()), 1.0, atol=1e-6)
+    np.testing.assert_allclose(float(np.asarray(out["w"]).sum()), 1.0, atol=TOL_SOLVER)
 
 
 def test_full_gram_allows_negative_weights_legitimate():

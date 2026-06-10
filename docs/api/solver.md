@@ -1,12 +1,11 @@
 # Solver and result types
 
 ```{eval-rst}
-.. automodule:: sliced_committor.solver
+.. automodule:: sliced_committor.core.solver
    :members:
       SlicedCommittorResult,
       WeightingContext,
       compute_sliced_committor,
-      evaluate_committor,
       compute_weights_multi,
       compute_full_gram_weights,
       compute_basin_moment_weights,
@@ -15,4 +14,10 @@
       make_weighting_context,
       why_masked,
       summarize_gram_diagnostics
+
+.. automodule:: sliced_committor.core.committor
+   :members:
+      build_committor,
+      fit_committor,
+      committor_gradient
 ```

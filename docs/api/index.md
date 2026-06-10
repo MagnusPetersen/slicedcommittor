@@ -6,5 +6,5 @@
 solver
 weights
 directions
-calibration
+rates
 ```

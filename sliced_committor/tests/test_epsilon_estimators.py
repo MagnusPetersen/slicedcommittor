@@ -8,7 +8,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
-from sliced_committor.weights import (
+from sliced_committor.core.weights import (
     compute_epsilon,
     compute_epsilon_equilibrium,
     compute_epsilon_flux1d,
