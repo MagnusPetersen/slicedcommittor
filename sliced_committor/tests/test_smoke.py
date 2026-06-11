@@ -18,7 +18,6 @@ from sliced_committor import (
     compute_full_gram_weights,
     compute_sliced_committor,
     compute_weights_multi,
-    get_all_weight_functions,
     get_default_weight_functions,
     make_weighting_context,
 )

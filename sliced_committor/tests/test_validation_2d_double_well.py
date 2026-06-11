@@ -44,8 +44,8 @@ def _solve_committor_2d_jacobi(
     """
     xs = np.linspace(x_min, x_max, n_grid)
     ys = np.linspace(y_min, y_max, n_grid)
-    dx = xs[1] - xs[0]
-    dy = ys[1] - ys[0]
+    xs[1] - xs[0]
+    ys[1] - ys[0]
     X, Y = np.meshgrid(xs, ys, indexing="xy")
 
     V = _double_well_potential(X, Y)

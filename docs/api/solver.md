@@ -19,5 +19,12 @@
    :members:
       build_committor,
       fit_committor,
-      committor_gradient
+      committor_gradient,
+      committor_dirichlet_energy,
+      CommittorFit
+
+.. automodule:: sliced_committor.core.sweep
+   :members:
+      sweep_committor,
+      SweepResult
 ```

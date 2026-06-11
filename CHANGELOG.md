@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-11
+
 ### Added
+- **Dirichlet energy + settings sweep.** `committor_dirichlet_energy(result,
+  weights, *, mode="auto")` returns the variational objective 𝓓[q̂] = wᵀG w of
+  the recombined committor (the physical gradient energy, no Tikhonov ridge), a
+  label-free relative quality ranker. `fit_committor(..., return_details=True)`
+  now populates the new `CommittorFit.dirichlet_energy` field with it. The
+  dedicated `sweep_committor(samples, *, in_A, in_B, grid={...}, select_by=
+  "dirichlet", on_error="skip", **fixed)` fits the full Cartesian product of a
+  settings grid and returns a `SweepResult` (all fits + their Dirichlet energies
+  + boundary errors + configs, plus `best_idx` / `.best_committor`). Purely
+  additive: existing fit / weight-solver numerics are unchanged.
 - **Callable committor API.** The committor is now a callable object built via
   `build_committor(result, weights, *, clip=True, enforce_boundary_conditions=True,
   rescale_transition=False)` (returns `q`, called as `q(points, *, in_A=None,
@@ -87,6 +99,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parametrizable `two_basin_samples` sampler (collapsing seven near-duplicate
   per-file samplers) and the reused `TOL_SOLVER` tolerance. Added `__all__ = []`
   to `core/__init__.py`.
+- **`directions_tica_ema` ridge is now trace-relative** (`η = ridge·tr(C0)/d`,
+  matching `compute_lda_axis` / `gcpca_basis` so a ridge value ports across them);
+  the 1e-6 default is a near-no-op vs the prior absolute ridge.
+  `directions_tica_ema_decomposed` keeps its tuned *absolute* whitening ridge,
+  now documented as such (not interchangeable with the relative ridges).
+- **Degenerate-input guards.** A zero-width plateau range (`at=(c, c)`) now
+  raises; `directions_tica_ema_decomposed` warns when between-window variance
+  collapses; a noise-dominated TICA solve (all eigenvalues ≤ 0) warns and falls
+  back to uniform directions. `committor_dirichlet_energy` masks invalid slices
+  for the centered / PESB ansätze so it always matches the built committor.
+- **Further DRY consolidation (behaviour-preserving).** A shared
+  Gram mask+Tikhonov helper (`_mask_and_regularize_gram`) across the constrained
+  / BMC / EBMC KKT solvers; a shared boundary-condition helper across
+  `build_committor` and the internal evaluator; a shared epsilon basin-moment
+  base; `dirichlet_rate` builds the co-area profile once; `committor.py` and
+  `sweep.py` share one `_energy_basis` classifier.
 
 ### Removed
 - **`evaluate_committor` removed from the public API.** Use the callable
@@ -106,10 +134,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `affine_calibration`, or `affine_clip` (and the deprecated ABC v1 code path).
   The evaluation-level post-processing it retains is `clip` (the `[0, 1]` bound),
   `enforce_boundary_conditions` (q=0 on A, q=1 on B), and `rescale_transition`.
+- **Public weight-solver surface trimmed.** The bare `basin_moment_weights`,
+  `enriched_basin_moment_weights`, and `enriched_basin_moment_weights_power`
+  names are no longer top-level exports; use the `compute_*` wrappers (the
+  documented, `result`-based interface). `EnrichedBMCRepresentationError` stays
+  public.
+- **Dropped the `center` argument** from `pca_basis` / `gcpca_basis` (they always
+  centre, the standard for unsupervised bases).
+- **Removed unreachable internal code:** the thin-shell BCM solver and its
+  multi-constraint KKT, `precompute_gram` / `precompute_gram_and_overlap` /
+  `solve_gram_weights` / `compute_gram_diagnostics` (a redundant `full_gram_weights`
+  alias), the residual-decomposition helpers, and the dead `needs_inversion`
+  plumbing in the 1-D RD solver. None were exported, tested, or reachable. The
+  Gram-quality diagnostics remain available on every solver's result dict via the
+  public `summarize_gram_diagnostics`.
 
 ### Fixed
 - Naming consistency pass across `solver.py`: standardised on `s_grid` for bin
   grids and `s_projected` for projected samples.
+- `committor_rate(reduction="plateau")` now reports `plateau_flatness` for an
+  explicit range too (previously only the `at="auto"` branch), and the auto
+  branch of `dirichlet_rate` / `tpt_rate` reports the plateau's own flatness
+  rather than recomputing it on a differently-filtered subset.
+- The settings-sweep mixed-energy-family warning now also fires for a callable
+  `select_by` that ranks on the Dirichlet energy, not only the string default.
 
 ## [0.4.0] - 2025-05-28
 

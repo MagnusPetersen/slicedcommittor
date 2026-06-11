@@ -86,3 +86,25 @@ For Gram-solver diagnostics:
 from sliced_committor import summarize_gram_diagnostics
 print(summarize_gram_diagnostics(ebmc))
 ```
+
+## Choosing settings (label-free)
+
+`fit_committor(..., return_details=True)` returns `(q, fit)`, where
+`fit.dirichlet_energy` is the variational objective `𝓓[q̂]` of the fit — a
+label-free, ground-truth-free quality score (lower is closer to the true
+committor). Sweep a grid and keep the best by that score with `sweep_committor`:
+
+```python
+from sliced_committor import sweep_committor
+
+res = sweep_committor(
+    samples, in_A=in_A, in_B=in_B,
+    grid={"n_directions": [128, 256], "weights": ["ebmc", "full_gram"]},
+    n_bins=200,                       # held fixed across the sweep
+)
+print(res.summary())                 # one row per combination; best marked *
+q = res.best_committor
+```
+
+The energy is comparable only within the Gram-family solvers (`ebmc` / `pesb` /
+`bmc` / `full_gram`). See [recipes.md](recipes.md) for more.

@@ -152,6 +152,39 @@ For very high-dimensional Cartesian features (d ≳ 200) the paper runs lower
 `boundary_quantile` to ~0.95 to suppress halo inflation in the projected
 state shadows. For low-d torsion features, the default 1.0 is fine.
 
+## Tuning settings + the variational objective
+
+Every fit can report its **Dirichlet energy** `𝓓[q̂] = ⟨D|∇q̂|²⟩` — a label-free,
+ground-truth-free quality score (lower is closer to the true committor, by the
+variational principle). Ask for it with `return_details=True`:
+
+```python
+q, fit = fit_committor(samples, in_A=in_A, in_B=in_B, return_details=True)
+print(fit.dirichlet_energy)          # the variational objective of this fit
+```
+
+To choose settings, sweep a grid and keep the best by that objective — no ground
+truth required:
+
+```python
+from sliced_committor import sweep_committor
+
+res = sweep_committor(
+    samples, in_A=in_A, in_B=in_B,
+    grid={"n_directions": [128, 256], "weights": ["ebmc", "full_gram"]},
+    n_bins=200,                       # held fixed across the sweep
+)
+print(res.summary())                 # one row per grid combination; best marked *
+q = res.best_committor               # the winner's callable q(x)
+```
+
+The Dirichlet energy is only comparable *within* the Gram-family solvers
+(`ebmc` / `pesb` / `bmc` / `full_gram`); a sweep that also varies onto the
+diagonal solver ranks on mismatched scales, so it warns — rank one family at a
+time, or pass a custom `select_by`. The mean boundary error is reported
+alongside as a guard against a fit that lowers its energy by undershooting the
+`q=0` / `q=1` boundaries.
+
 ## Direction-sampling alternatives
 
 The default sampler is uniform on the sphere. For directed bias, the

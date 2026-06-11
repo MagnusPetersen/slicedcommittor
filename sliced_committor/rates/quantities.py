@@ -394,8 +394,13 @@ def _coarea_profile(levels, contrib, n_bins):
 
 def _plateau_flux(levels, contrib, lo, hi):
     """Bin-free plateau-MC flux: ``(Σ_{lo≤q≤hi} contrib) / (hi − lo)``."""
+    if hi <= lo:
+        raise ValueError(
+            f"plateau range must satisfy lo < hi; got lo={lo}, hi={hi}. A "
+            "zero-width range has no well-defined flux (pass at=(lo, hi) with lo < hi)."
+        )
     mask = (levels >= lo) & (levels <= hi)
-    return float(np.sum(contrib[mask]) / max(hi - lo, 1e-30))
+    return float(np.sum(contrib[mask]) / (hi - lo))
 
 
 def reactive_flux(committor, samples, *, D, at=None, sample_weights=None, n_bins=200):
@@ -410,7 +415,7 @@ def reactive_flux(committor, samples, *, D, at=None, sample_weights=None, n_bins
         samples: ``(N, dim)`` static ensemble.
         D: scalar, callable ``level -> D``, or a diffusion :class:`Profile`.
         at: ``None`` -> :class:`Profile` of Φ(c); scalar -> Φ(q*); ``(lo, hi)``
-            -> bin-free plateau Monte-Carlo flux over the range.
+            -> bin-free plateau Monte-Carlo flux over the range (requires ``lo < hi``).
         sample_weights: ``(N,)`` optional MBAR weights.
         n_bins: number of iso-committor bins for the Φ(c) profile (the ``(lo, hi)``
             plateau flux itself is bin-free).

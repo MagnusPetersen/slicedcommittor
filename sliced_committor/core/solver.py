@@ -37,13 +37,12 @@ Pipeline:
     3. evaluate_committor        →  q̄(x)
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import partial
-from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import jit, lax, random, vmap
 
 from ._internal import sample_random_directions, signed_logsumexp, to_log_abs_sign
@@ -505,11 +504,13 @@ def find_boundary_indices_from_samples(
         s_A_proj: (n_A,) pre-extracted projections of state A samples (optional)
         s_B_proj: (n_B,) pre-extracted projections of state B samples (optional)
         boundary_quantile: Quantile for inner-edge placement (default 1.0 = extreme).
-            Values < 1.0 shrink the boundary toward the state centroid, mitigating
-            the halo artifact in high dimensions where d >> k (state-defining dims).
+            Only effective on the sparse path (when ``s_A_proj`` / ``s_B_proj`` are
+            pre-supplied, as ``compute_sliced_committor`` always does); the dense
+            fallback ignores it. Values < 1.0 shrink the boundary toward the state
+            centroid, mitigating the halo artifact in high dimensions where d >> k.
 
     Returns:
-        a_idx, b_idx, is_valid, needs_inversion  (all JAX scalars)
+        a_idx, b_idx, is_valid  (all JAX scalars)
     """
     if s_A_proj is not None and s_B_proj is not None:
         # Sparse path: operate on pre-extracted |A| and |B| arrays
@@ -581,12 +582,6 @@ def find_boundary_indices_from_samples(
     s_left = jnp.minimum(s_A_inner, s_B_inner)
     s_right = jnp.maximum(s_A_inner, s_B_inner)
 
-    # Inversion: needed when state A is globally to the RIGHT of state B.
-    # Use center positions (not inner edges) because when projections overlap
-    # (common in high dimensions), inner edges can cross even when A is on the
-    # left by centers, causing a spurious inversion that flips q(A)→1, q(B)→0.
-    needs_inversion = s_A_center > s_B_center
-
     # Map to grid indices (searchsorted + nearest-neighbor)
     def _nearest_idx(s_grid, s_val):
         n = s_grid.shape[0]
@@ -609,7 +604,7 @@ def find_boundary_indices_from_samples(
     a_idx_final = jnp.where(is_valid, a_idx_final, mid)
     b_idx_final = jnp.where(is_valid, b_idx_final, mid)
 
-    return a_idx_final, b_idx_final, is_valid, needs_inversion
+    return a_idx_final, b_idx_final, is_valid
 
 
 # =============================================================================
@@ -644,7 +639,6 @@ def compute_1d_rd_committor(
     in_A: jnp.ndarray,
     in_B: jnp.ndarray,
     is_valid: jnp.ndarray,
-    needs_inversion: jnp.ndarray,
     rd_kappa: float = 100.0,
     ds_arr: jnp.ndarray = None,
     s_A_proj: jnp.ndarray = None,
@@ -679,7 +673,6 @@ def compute_1d_rd_committor(
         in_A: (N,) boolean, state A membership
         in_B: (N,) boolean, state B membership
         is_valid: Whether this direction is valid
-        needs_inversion: Whether to invert the committor
         rd_kappa: Absorption strength κ (must be > 0)
         ds_arr: Pre-computed bin spacing (optional, computed if not provided)
         s_A_proj: (n_A,) pre-extracted projections of state A samples (optional)
@@ -959,7 +952,9 @@ def compute_sliced_committor(
         rd_kappa: RD absorption strength κ.
         quantile_subsample: If set and > 0, use a random subsample of this
             size for quantile edge estimation. Reduces O(N log N) sort to
-            O(K log K + N log n_bins). Auto-enabled for large N when None.
+            O(K log K + N log n_bins). When None (default), auto-enabled for
+            N > 20000 (with binning_method='quantile') using a subsample of
+            10000; pass 0 to force the exact full-N sort.
         direction_batch_size: Process directions in batches of this size to
             limit memory. If None (default), all directions are processed
             in a single vmap call. Set to e.g. 64 or 128 when N is large.
@@ -1150,7 +1145,7 @@ def compute_sliced_committor(
         s_A_sorted = jnp.sort(s_A)
         s_B_sorted = jnp.sort(s_B)
 
-        a_idx, b_idx, is_valid, needs_inv = find_boundary_indices_from_samples(
+        a_idx, b_idx, is_valid = find_boundary_indices_from_samples(
             s_vals,
             s_projected,
             in_A,
@@ -1171,7 +1166,6 @@ def compute_sliced_committor(
             in_A,
             in_B,
             is_valid,
-            needs_inv,
             rd_kappa=rd_kappa,
             ds_arr=ds_arr,
             s_A_proj=s_A,
@@ -1422,6 +1416,39 @@ def _evaluate_powered_smoothstep_from_qall(
     return (c + contrib).reshape(original_shape)
 
 
+def _apply_boundary_conditions(q, in_A, in_B, original_shape, rescale_transition):
+    """Snap query points in basin A → 0 and B → 1, optional transition rescale.
+
+    Shared by :func:`evaluate_committor` and :func:`build_committor`'s closure so
+    the two aggregators apply identical boundary handling. ``in_A`` / ``in_B`` may
+    be ``None`` (treated as the empty mask) and are reshaped to ``original_shape``.
+    When ``rescale_transition`` is set, the non-basin region is affine-rescaled to
+    span ``[0, 1]`` before the snap (the weighted average of 1D committors can
+    compress the range).
+    """
+    mask_A = (
+        jnp.asarray(in_A).reshape(original_shape)
+        if in_A is not None
+        else jnp.zeros(original_shape, dtype=bool)
+    )
+    mask_B = (
+        jnp.asarray(in_B).reshape(original_shape)
+        if in_B is not None
+        else jnp.zeros(original_shape, dtype=bool)
+    )
+    if rescale_transition:
+        in_transition = ~mask_A & ~mask_B
+        q_trans = jnp.where(in_transition, q, jnp.nan)
+        q_min = jnp.nanmin(q_trans)
+        span = jnp.maximum(jnp.nanmax(q_trans) - q_min, 1e-10)
+        q = jnp.where(in_transition, (q - q_min) / span, q)
+    if in_A is not None:
+        q = jnp.where(mask_A, 0.0, q)
+    if in_B is not None:
+        q = jnp.where(mask_B, 1.0, q)
+    return q
+
+
 def evaluate_committor(
     result: SlicedCommittorResult,
     points: jnp.ndarray,
@@ -1526,12 +1553,14 @@ def evaluate_committor(
         if estimated_mem > 1e9:
             batch_size = max(256, int(1e9 / (n_pts * 4)))
 
+    def _qall():
+        if use_stored_projections and result.projected_samples is not None:
+            return _qall_stored(s_coords, q_1d, result.projected_samples)
+        return _qall_onthefly(directions, s_coords, q_1d, points_flat)
+
     if is_pesb_smoothstep:
         # PESB-EBMC path: powered slice basis (Ψ_n family) with EBMC bias.
-        if use_stored_projections and result.projected_samples is not None:
-            q_all = _qall_stored(s_coords, q_1d, result.projected_samples)
-        else:
-            q_all = _qall_onthefly(directions, s_coords, q_1d, points_flat)
+        q_all = _qall()
         q_result = _evaluate_powered_smoothstep_from_qall(
             q_all,
             pesb_w_by_power,
@@ -1545,10 +1574,7 @@ def evaluate_committor(
         # Affine-ansatz path: weights are in absolute units (not convex). Skip
         # the sum-to-one log-space normalization and the legacy batched
         # path; those mix poorly with the additive intercept.
-        if use_stored_projections and result.projected_samples is not None:
-            q_all = _qall_stored(s_coords, q_1d, result.projected_samples)
-        else:
-            q_all = _qall_onthefly(directions, s_coords, q_1d, points_flat)
+        q_all = _qall()
         q_result = _evaluate_centered_from_qall(
             q_all,
             centered_w,
@@ -1599,10 +1625,7 @@ def evaluate_committor(
 
         q_result = (sgn_q * jnp.exp(log_q)).reshape(original_shape)
     else:
-        if use_stored_projections and result.projected_samples is not None:
-            q_all = _qall_stored(s_coords, q_1d, result.projected_samples)
-        else:
-            q_all = _qall_onthefly(directions, s_coords, q_1d, points_flat)
+        q_all = _qall()
         q_result = _evaluate_logspace_from_qall(
             q_all,
             sign_w,
@@ -1618,31 +1641,9 @@ def evaluate_committor(
         q_result = jnp.clip(q_result, 0.0, 1.0)
 
     if enforce_boundary_conditions and (in_A is not None or in_B is not None):
-        mask_A = (
-            jnp.asarray(in_A).reshape(original_shape)
-            if in_A is not None
-            else jnp.zeros(original_shape, dtype=bool)
+        q_result = _apply_boundary_conditions(
+            q_result, in_A, in_B, original_shape, rescale_transition
         )
-        mask_B = (
-            jnp.asarray(in_B).reshape(original_shape)
-            if in_B is not None
-            else jnp.zeros(original_shape, dtype=bool)
-        )
-
-        if rescale_transition:
-            # Affine-rescale transition region to [0, 1]: the weighted
-            # average of 1D committors can compress the range.
-            in_transition = ~mask_A & ~mask_B
-            q_trans = jnp.where(in_transition, q_result, jnp.nan)
-            q_min = jnp.nanmin(q_trans)
-            q_max = jnp.nanmax(q_trans)
-            span = jnp.maximum(q_max - q_min, 1e-10)
-            q_result = jnp.where(in_transition, (q_result - q_min) / span, q_result)
-
-        if in_A is not None:
-            q_result = jnp.where(mask_A, 0.0, q_result)
-        if in_B is not None:
-            q_result = jnp.where(mask_B, 1.0, q_result)
 
     return q_result
 

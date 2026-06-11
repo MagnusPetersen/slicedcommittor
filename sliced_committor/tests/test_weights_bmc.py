@@ -5,13 +5,10 @@ than imports the upstream module.
 """
 
 import jax
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
 import sliced_committor as sc
-from sliced_committor import EnrichedBMCRepresentationError  # for parallel error type
-from sliced_committor.core._bmc import BMCRepresentationError
 
 from ._helpers import TOL_SOLVER, two_basin_samples
 

@@ -36,9 +36,7 @@ Pure JAX, JIT-compiled, log-space arithmetic.
 """
 
 import logging
-from collections.abc import Callable
 from functools import partial
-from typing import Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
@@ -47,13 +45,12 @@ from jax import jit, vmap
 
 logger = logging.getLogger(__name__)
 
-from ._internal import signed_logsumexp, to_log_abs_sign
+from ._internal import to_log_abs_sign
 from .gram import (
-    _assemble_gram_matrix,
     _compute_derivative_matrix,
     compute_shared_gram_diagnostics,
 )
-from .solver import WeightingContext, _interp_1d_at_samples
+from .solver import _interp_1d_at_samples
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -161,6 +158,29 @@ def _basin_weight_sums(in_A, in_B, sample_weights):
     return w_A, w_B, Z_A, Z_B
 
 
+def _basin_moment_base(ctx, sample_weights):
+    """Shared front-half of the equilibrium / RMS epsilon estimators.
+
+    Validates basin labels + projections, builds per-basin sample weights
+    (:func:`_basin_weight_sums`), and interpolates the per-slice committor at the
+    A- and B-masked samples. Returns ``(q_A, q_B, w_A, w_B, Z_A, Z_B)``; each
+    estimator applies only its own final reduction.
+    """
+    if ctx.in_A is None or ctx.in_B is None:
+        raise ValueError("ctx.in_A / ctx.in_B required for epsilon computation")
+    if ctx.projected_samples is None:
+        raise ValueError("projected_samples required for epsilon computation")
+    in_A, in_B = ctx.in_A, ctx.in_B
+    w_A, w_B, Z_A, Z_B = _basin_weight_sums(in_A, in_B, sample_weights)
+    q_A = _interpolate_q_at_samples_masked(
+        ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_A
+    )
+    q_B = _interpolate_q_at_samples_masked(
+        ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_B
+    )
+    return q_A, q_B, w_A, w_B, Z_A, Z_B
+
+
 def compute_epsilon_equilibrium(ctx, sample_weights=None):
     """Equilibrium-weighted boundary error: eps_A = mean(q at A), eps_B = mean(1-q at B).
 
@@ -173,23 +193,9 @@ def compute_epsilon_equilibrium(ctx, sample_weights=None):
             is consistent with a Gram matrix assembled with the same weights.
             If None, uniform 1/N (matches the cached RD estimator).
     """
-    if ctx.in_A is None or ctx.in_B is None:
-        raise ValueError("ctx.in_A / ctx.in_B required for epsilon computation")
-    if ctx.projected_samples is None:
-        raise ValueError("projected_samples required for epsilon computation")
-    in_A, in_B = ctx.in_A, ctx.in_B
-    w_A, w_B, Z_A, Z_B = _basin_weight_sums(in_A, in_B, sample_weights)
-
-    q_A = _interpolate_q_at_samples_masked(
-        ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_A
-    )
-    q_B = _interpolate_q_at_samples_masked(
-        ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_B
-    )
-
+    q_A, q_B, w_A, w_B, Z_A, Z_B = _basin_moment_base(ctx, sample_weights)
     eps_A = jnp.sum(q_A * w_A[None, :], axis=1) / Z_A
     eps_B = 1.0 - jnp.sum(q_B * w_B[None, :], axis=1) / Z_B
-
     return eps_A + eps_B
 
 
@@ -204,20 +210,7 @@ def compute_epsilon_rms(ctx, sample_weights=None):
     with long projection tails). JIT-friendly weighted second moment, so
     respects ``sample_weights``.
     """
-    if ctx.in_A is None or ctx.in_B is None:
-        raise ValueError("ctx.in_A / ctx.in_B required for epsilon computation")
-    if ctx.projected_samples is None:
-        raise ValueError("projected_samples required for epsilon computation")
-    in_A, in_B = ctx.in_A, ctx.in_B
-    w_A, w_B, Z_A, Z_B = _basin_weight_sums(in_A, in_B, sample_weights)
-
-    q_A = _interpolate_q_at_samples_masked(
-        ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_A
-    )
-    q_B = _interpolate_q_at_samples_masked(
-        ctx.slice_coords, ctx.committors_1d, ctx.projected_samples, in_B
-    )
-
+    q_A, q_B, w_A, w_B, Z_A, Z_B = _basin_moment_base(ctx, sample_weights)
     ms_A = jnp.sum(w_A[None, :] * q_A**2, axis=1) / Z_A
     ms_B = jnp.sum(w_B[None, :] * (1.0 - q_B) ** 2, axis=1) / Z_B
     eps_A = jnp.sqrt(jnp.maximum(ms_A, 0.0))
@@ -620,6 +613,30 @@ def _resolve_eta(eta, M, valid_mask, sample_weights=None, N=None):
     return float(eta), None
 
 
+def _mask_and_regularize_gram(G, valid_mask, eta_val):
+    """Mask invalid directions and add the median-diagonal Tikhonov ridge.
+
+    Invalid directions get zeroed rows/cols and a unit diagonal (so the
+    regularised Gram stays SPD); the ridge is scaled by the median of the
+    valid diagonal entries. Shared by every Gram-based KKT solver
+    (``_solve_constrained_gram_jit`` here, plus the basin-moment and enriched
+    solvers in ``_bmc`` / ``_bmc_enriched``). Traced into each caller's JIT
+    region; not decorated to avoid a redundant jit boundary.
+
+    Returns ``(G_reg, med_diag)``: the regularised Gram and the median valid
+    diagonal used to scale the ridge.
+    """
+    M = G.shape[0]
+    valid = valid_mask.astype(G.dtype)
+    mask_2d = valid[:, None] * valid[None, :]
+    G_masked = G * mask_2d + jnp.diag(1.0 - valid)  # invalid → identity row
+    G_diag_valid = jnp.where(valid > 0, jnp.diag(G_masked), jnp.inf)
+    med_diag = jnp.median(G_diag_valid)
+    med_diag = jnp.where(jnp.isfinite(med_diag) & (med_diag > 0), med_diag, 1.0)
+    G_reg = G_masked + eta_val * med_diag * jnp.eye(M)
+    return G_reg, med_diag
+
+
 @partial(jit, static_argnames=("constraint",))
 def _solve_constrained_gram_jit(G, b, valid_mask, eta_val, constraint="sum"):
     """JIT-compiled numerical body of the constrained Gram solve.
@@ -630,19 +647,8 @@ def _solve_constrained_gram_jit(G, b, valid_mask, eta_val, constraint="sum"):
     a single JIT region eliminates ~10 host syncs per call and lets XLA fuse
     the masking, Tikhonov, Cholesky, and self-consistency arithmetic.
     """
-    M = G.shape[0]
     valid = valid_mask.astype(G.dtype)
-
-    # Mask invalid directions: zero rows/cols, identity on diagonal
-    mask_2d = valid[:, None] * valid[None, :]
-    G_masked = G * mask_2d + jnp.diag(1.0 - valid)  # invalid → identity row
-
-    # Adaptive Tikhonov: η × median(valid diagonal entries)
-    G_diag_valid = jnp.where(valid > 0, jnp.diag(G_masked), jnp.inf)
-    med_diag = jnp.median(G_diag_valid)
-    # Fallback if all invalid
-    med_diag = jnp.where(jnp.isfinite(med_diag) & (med_diag > 0), med_diag, 1.0)
-    G_reg = G_masked + eta_val * med_diag * jnp.eye(M)
+    G_reg, _med_diag = _mask_and_regularize_gram(G, valid_mask, eta_val)
 
     # Prepare RHS
     b_masked = b * valid
@@ -864,326 +870,6 @@ def _solve_constrained_gram(
     }
 
 
-# ---------------------------------------------------------------------------
-# Multi-constraint KKT solve  (used by thin-shell BCM, Component F)
-# ---------------------------------------------------------------------------
-
-
-@jit
-def _solve_multi_constraint_gram_jit(G, A, c, b, valid_mask, eta_val):
-    """Solve min_w wᵀ G w subject to A w = c via the KKT block-Schur form.
-
-    The KKT system
-        [G   Aᵀ] [w]   [0]
-        [A    0] [λ] = [c]
-    reduces to ``(A G⁻¹ Aᵀ) λ = c`` and ``w = G⁻¹ Aᵀ λ``. Both forward
-    solves share a single Cholesky factor of the Tikhonov-regularised G,
-    so the overhead over the single-constraint solver is a (k, M) tri-
-    solve, a (k, k) inversion, and a (M,) matvec.
-
-    ``b = 1 − ε`` is passed only so σ_M can be computed from the same
-    Cholesky factor; σ_M does not enter the solution itself.
-
-    Args:
-        G: (M, M) Gram matrix.
-        A: (k, M) linear-constraint matrix.
-        c: (k,) RHS of the constraints.
-        b: (M,) boundary-error vector (1 − ε) for σ_M diagnostic only.
-        valid_mask: (M,) boolean mask of valid directions.
-        eta_val: float Tikhonov coefficient (resolved by ``_resolve_eta``).
-
-    Returns:
-        dict with ``w``, ``lambda``, ``G_reg``, ``A_masked``, ``M_lambda``,
-        ``sigma_M``, ``constraint_residual`` (= ‖A w − c‖∞), and the same
-        silent-degradation scalars as the single-constraint solver
-        (``mean_b_magnitude``, ``fraction_b_negative``) so downstream
-        diagnostics can be reused.
-    """
-    M = G.shape[0]
-    k = A.shape[0]
-    valid = valid_mask.astype(G.dtype)
-    mask_2d = valid[:, None] * valid[None, :]
-    G_masked = G * mask_2d + jnp.diag(1.0 - valid)
-
-    G_diag_valid = jnp.where(valid > 0, jnp.diag(G_masked), jnp.inf)
-    med_diag = jnp.median(G_diag_valid)
-    med_diag = jnp.where(jnp.isfinite(med_diag) & (med_diag > 0), med_diag, 1.0)
-    G_reg = G_masked + eta_val * med_diag * jnp.eye(M)
-
-    # Mask invalid columns of A (forced w_j = 0 anyway).
-    A_masked = A * valid[None, :]
-    b_masked = b * valid
-
-    U, lower = jax.scipy.linalg.cho_factor(G_reg)
-
-    # Solve G y_j = A_j for j = 1, ..., k → Y is (M, k).
-    Y = jax.scipy.linalg.cho_solve((U, lower), A_masked.T)
-    # M_λ = A G⁻¹ Aᵀ → (k, k) Schur complement.
-    M_lambda = A_masked @ Y
-    # λ = M_λ⁻¹ c  (k is small, k ≤ ~10 in practice). No Tikhonov on M_λ:
-    # the constraints should be satisfied *exactly* given G_reg, which is the
-    # actual operator we minimise against. Regularising M_λ would loosen the
-    # constraints; diagnose ill-conditioning via constraint_residual below.
-    lam = jnp.linalg.solve(M_lambda, c)
-    w = (Y @ lam) * valid
-
-    # σ_M = 1 / (bᵀ G⁻¹ b): uses the same Cholesky factor, independent of
-    # the constraint structure.
-    Ginv_b = jax.scipy.linalg.cho_solve((U, lower), b_masked)
-    P = jnp.dot(b_masked, Ginv_b)
-    P_safe = jnp.where(jnp.abs(P) > 1e-30, P, 1e-30)
-    sigma_M = 1.0 / P_safe
-
-    constraint_residual = jnp.max(jnp.abs(A_masked @ w - c))
-
-    n_valid_f = jnp.maximum(jnp.sum(valid), 1.0)
-    mean_b_magnitude = jnp.sum(jnp.abs(b_masked)) / n_valid_f
-    fraction_b_negative = jnp.sum(((b_masked < 0) & (valid > 0)).astype(G.dtype)) / n_valid_f
-
-    return {
-        "w": w,
-        "lambda": lam,
-        "G_reg": G_reg,
-        "A_masked": A_masked,
-        "M_lambda": M_lambda,
-        "sigma_M": sigma_M,
-        "P": P,
-        "constraint_residual": constraint_residual,
-        "mean_b_magnitude": mean_b_magnitude,
-        "fraction_b_negative": fraction_b_negative,
-    }
-
-
-def _solve_multi_constraint_gram(
-    G, A, c, b, valid_mask, eta="auto", sample_weights=None, N=None, compute_condition_number=False
-):
-    """Python wrapper around :func:`_solve_multi_constraint_gram_jit`.
-
-    Resolves ``eta='auto'`` against the sample-derived N_eff, optionally
-    computes the exact condition number of the constraint Schur complement
-    M_λ (small, k × k, so this is cheap), and converts scalar JAX outputs
-    to Python floats.
-
-    Args:
-        G: (M, M) Gram matrix.
-        A: (k, M) linear-constraint matrix.
-        c: (k,) RHS of the constraints.
-        b: (M,) boundary-error vector (1 − ε); used only for σ_M and the
-            silent-degradation scalars, not for the solution.
-        valid_mask: (M,) boolean mask of valid directions.
-        eta: Tikhonov regularisation (float or ``'auto'``).
-        sample_weights, N: used only when ``eta='auto'``.
-        compute_condition_number: if True, also return ``cond(M_lambda)``;
-            small (k × k) so cost is negligible.
-
-    Returns:
-        dict: see ``_solve_multi_constraint_gram_jit`` plus ``eta_used``,
-        ``N_eff``, ``condition_number_M_lambda``, ``sign_w``, ``log_abs_w``.
-    """
-    M = G.shape[0]
-    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N)
-
-    out = _solve_multi_constraint_gram_jit(G, A, c, b, valid_mask, eta_val)
-
-    if compute_condition_number:
-        cond_ml = float(jnp.linalg.cond(out["M_lambda"]))
-    else:
-        cond_ml = float("nan")
-
-    sign_w, log_abs_w = to_log_abs_sign(out["w"])
-
-    return {
-        "w": out["w"],
-        "sign_w": sign_w,
-        "log_abs_w": log_abs_w,
-        "lambda": out["lambda"],
-        "G_reg": out["G_reg"],
-        "A_masked": out["A_masked"],
-        "M_lambda": out["M_lambda"],
-        "sigma_M": float(out["sigma_M"]),
-        "P": float(out["P"]),
-        "constraint_residual": float(out["constraint_residual"]),
-        "mean_b_magnitude": float(out["mean_b_magnitude"]),
-        "fraction_b_negative": float(out["fraction_b_negative"]),
-        "condition_number_M_lambda": cond_ml,
-        "eta_used": float(eta_val),
-        "N_eff": float(N_eff_val) if N_eff_val is not None else None,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Public interface
-# ---------------------------------------------------------------------------
-
-
-def precompute_gram(ctx, samples=None, sample_weights=None):
-    """Compute the Gram matrix G and boundary vector b (without solving).
-
-    Use with ``solve_gram_weights`` to sweep Tikhonov values efficiently:
-    compute G once, then solve for each eta.
-
-    Args:
-        ctx: WeightingContext (standard interface).
-        samples: (N, dim) equilibrium samples.  Ignored when
-            ctx.projected_samples is available.
-        sample_weights: (N,) optional MBAR weights; if None, defaults to
-            ctx.sample_weights (which is None for uniform measure).
-            A ``None`` default silently assumes uniform 1/N; this is
-            inappropriate for biased sampling (umbrella, metadynamics,
-            replica exchange).  A warning is logged in that case
-            (Issue 8); pass explicit weights to suppress it.
-
-    Returns:
-        G: (M, M) cross-Dirichlet Gram matrix.
-        b: (M,) boundary correction vector (1 − ε).
-    """
-    if sample_weights is None:
-        sample_weights = ctx.sample_weights
-    if sample_weights is None:
-        logger.warning(
-            "precompute_gram: sample_weights=None; assuming uniform 1/N. "
-            "Pass MBAR weights explicitly if samples are non-equilibrium."
-        )
-
-    epsilon = ctx.boundary_errors
-    if epsilon is None:
-        raise ValueError("Boundary errors not available.")
-
-    if ctx.projected_samples is not None:
-        projected_samples = ctx.projected_samples
-    elif samples is not None:
-        projected_samples = ctx.directions @ samples.T  # (M, N)
-    else:
-        raise ValueError(
-            "Either pass samples explicitly or use "
-            "store_projected_samples=True in compute_sliced_committor()."
-        )
-
-    N = projected_samples.shape[1]
-    W = sample_weights if sample_weights is not None else jnp.ones(N) / N
-
-    F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
-    G = _assemble_gram_matrix(F, W, cos_matrix)
-    b = 1.0 - epsilon
-
-    return G, b
-
-
-def precompute_gram_and_overlap(ctx, samples=None, sample_weights=None):
-    """Compute G, H, M, F, Q, W, b in a single sweep.
-
-    Companion to ``precompute_gram`` that additionally assembles the L²
-    overlap matrix M_jk = ⟨q_j q_k⟩_W, the cosine-stripped slice-derivative
-    inner factor H_jk = ⟨F_j F_k⟩_W, and returns the intermediate F and Q
-    matrices for downstream CV-discovery use.
-
-    Args:
-        ctx: WeightingContext (standard interface).
-        samples: (N, dim) equilibrium samples. Ignored when
-            ctx.projected_samples is available.
-        sample_weights: (N,) optional MBAR weights; if None, defaults to
-            ctx.sample_weights (uniform 1/N with a warning if both are None).
-
-    Returns:
-        dict with keys ``G, H, M, F, Q_samples, W, b, projected_samples``.
-
-        ``H`` is the basis-cosine-stripped inner factor: ``G = cos * H``.
-        Gradient-correlation readouts (r, C[q̂]) consume ``H`` rather than
-        ``G`` so that off-diagonal structure is not zeroed by orthogonal
-        basis directions; see ``src/analysis/slice_correlation.py``.
-    """
-    if sample_weights is None:
-        sample_weights = ctx.sample_weights
-    if sample_weights is None:
-        logger.warning(
-            "precompute_gram_and_overlap: sample_weights=None; assuming "
-            "uniform 1/N. Pass MBAR weights explicitly if samples are "
-            "non-equilibrium."
-        )
-
-    epsilon = ctx.boundary_errors
-    if epsilon is None:
-        raise ValueError("Boundary errors not available.")
-
-    if ctx.projected_samples is not None:
-        projected_samples = ctx.projected_samples
-    elif samples is not None:
-        projected_samples = ctx.directions @ samples.T  # (M, N)
-    else:
-        raise ValueError(
-            "Either pass samples explicitly or use "
-            "store_projected_samples=True in compute_sliced_committor()."
-        )
-
-    N = projected_samples.shape[1]
-    W = sample_weights if sample_weights is not None else jnp.ones(N) / N
-
-    F = _compute_derivative_matrix(ctx, projected_samples)
-    Q_samples = _interpolate_q_at_all_samples(
-        ctx.slice_coords,
-        ctx.committors_1d,
-        projected_samples,
-    )
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
-    G, H = _assemble_gram_and_inner(F, W, cos_matrix)
-    M_overlap = _assemble_overlap_matrix(Q_samples, W)
-    b = 1.0 - epsilon
-
-    return {
-        "G": G,
-        "H": H,
-        "M": M_overlap,
-        "F": F,
-        "Q_samples": Q_samples,
-        "W": W,
-        "b": b,
-        "projected_samples": projected_samples,
-    }
-
-
-def solve_gram_weights(
-    G,
-    b,
-    valid_mask,
-    eta="auto",
-    constraint="sum",
-    sample_weights=None,
-    N=None,
-    compute_condition_number=False,
-):
-    """Solve the constrained Gram problem for a given regularisation.
-
-    Use with ``precompute_gram`` to sweep Tikhonov values without
-    recomputing the Gram matrix each time.
-
-    Args:
-        G: (M, M) Gram matrix from ``precompute_gram``.
-        b: (M,) boundary vector from ``precompute_gram``.
-        valid_mask: (M,) boolean mask for valid directions.
-        eta: Tikhonov regularisation. Float or ``'auto'`` (default,
-            N_eff-adaptive).
-        constraint: ``'sum'`` (Σw=1, default) or ``'flux'`` (bᵀw=1).
-        sample_weights: only used when ``eta='auto'`` to estimate N_eff.
-        N: fallback N for ``eta='auto'`` when sample_weights is None.
-        compute_condition_number: if True, compute the exact SVD-based
-            condition number (O(M³) extra work). Default False (NaN).
-
-    Returns:
-        dict: same keys as ``_solve_constrained_gram``.
-    """
-    return _solve_constrained_gram(
-        G,
-        b,
-        valid_mask,
-        eta=eta,
-        constraint=constraint,
-        sample_weights=sample_weights,
-        N=N,
-        compute_condition_number=compute_condition_number,
-    )
-
-
 def _add_gram_diagnostics(result, G, b, valid_mask, ctx=None):
     """Append the full-Gram solver's diagnostics to ``result``.
 
@@ -1374,415 +1060,6 @@ def full_gram_weights(
         )
 
     return result
-
-
-def compute_gram_diagnostics(ctx, samples=None, sample_weights=None, tikhonov="auto"):
-    """Compute Gram matrix diagnostics (convenience wrapper).
-
-    Calls full_gram_weights and returns the full result dict.
-    See full_gram_weights for documentation.
-    """
-    return full_gram_weights(ctx, samples, sample_weights, tikhonov)
-
-
-# ===========================================================================
-# THIN-SHELL BCM WEIGHTS (Component F from the optimal-weights document)
-# ===========================================================================
-#
-# Solves the constrained Dirichlet-energy problem
-#
-#   min_w wᵀ G w   s.t.   a_δᵀ w = 0,   b_δᵀ w = 1,
-#
-# where a_δ_j = μ_{A_δ}[q_θj(θj·x)], b_δ_j = μ_{B_δ}[q_θj(θj·x)] are basin
-# moments over near-boundary shells
-#
-#   A_δ := {x ∉ A : dist(x, A) ≤ quantile_δ(dist(·, A) | x ∉ A)},
-#
-# and similarly B_δ. As δ → 0 the shells contract to the boundaries
-# ∂A, ∂B and the constraints approach the GFI flux-weighted BC integral
-# that controls ε̄. As δ → 1 they reduce to the full basin-conditional
-# moment constraints (a_doc, b_doc in the document's (P) statement).
-# ===========================================================================
-
-
-def thin_shell_bcm_weights(
-    ctx,
-    samples,
-    sample_weights=None,
-    *,
-    delta=0.1,
-    in_A=None,
-    in_B=None,
-    dist_to_A=None,
-    dist_to_B=None,
-    tikhonov="auto",
-    gram_dtype="float32",
-    compute_condition_number=False,
-    epsilon_fn=None,
-    clamp_epsilon=False,
-):
-    """Thin-shell basin-conditional moment constraints (Component F).
-
-    Builds the cross-Dirichlet Gram G the same way as
-    :func:`full_gram_weights`, but replaces the single linear constraint
-    (Σw = 1 or bᵀw = 1) with the two near-boundary basin-moment constraints
-
-        a_δᵀ w = 0    (q̄ averages to ~0 over the near-A shell A_δ)
-        b_δᵀ w = 1    (q̄ averages to ~1 over the near-B shell B_δ)
-
-    See module docstring for the shell definition. No new hyperparameter γ
-    (no Nitsche penalty form): the shell quantile δ is the only free knob.
-
-    Args:
-        ctx: ``WeightingContext`` (must have ``slice_coords``,
-            ``committors_1d``, ``directions`` populated; carries the cached
-            ε via ``ctx.boundary_errors`` for σ_M / silent-degradation
-            diagnostics).
-        samples: (N, dim) equilibrium samples in the same feature space as
-            ``ctx.directions``.
-        sample_weights: (N,) optional MBAR weights. None ⇒ uniform 1/N.
-        delta: shell quantile in (0, 1]. δ = 0.1 (default) takes the
-            nearest-to-A 10% of out-of-A samples (by feature-space Euclidean
-            distance to the nearest in-A sample) as A_δ. δ = 1.0 reduces
-            to the full basin-conditional moments.
-        in_A, in_B: (N,) optional precomputed basin masks. If None, taken
-            from ``ctx.in_A`` / ``ctx.in_B``.
-        dist_to_A, dist_to_B: (N,) sample-to-nearest-basin-sample distances.
-            Required: geometric distance utilities are outside the library
-            scope, so callers must compute these in their own feature space
-            (e.g. ``scipy.spatial.distance.cdist`` or a custom RMSD) and pass
-            them in.
-        tikhonov, gram_dtype, compute_condition_number, epsilon_fn,
-        clamp_epsilon: same semantics as :func:`full_gram_weights`.
-
-    Returns:
-        dict with keys (in addition to the multi-constraint solver output):
-            ``G``, ``H``: Gram matrix and its cosine-stripped factor.
-            ``b``: 1 − ε used for σ_M.
-            ``a_delta``, ``b_delta``: (M,) basin-moment vectors at δ-shell.
-            ``delta``: δ used.
-            ``n_A_delta``, ``n_B_delta``: shell sample counts (int).
-            ``dist_threshold_A``, ``dist_threshold_B``: distance cutoffs
-                defining each shell (Python floats).
-
-    Raises:
-        ValueError: if either shell is empty, or if basin masks/distances
-            cannot be derived from ctx and were not passed explicitly.
-    """
-    if not (0.0 < delta <= 1.0):
-        raise ValueError(f"delta must be in (0, 1], got {delta!r}")
-
-    if sample_weights is None:
-        sample_weights = ctx.sample_weights
-    if sample_weights is None:
-        logger.warning(
-            "thin_shell_bcm_weights: sample_weights=None; assuming uniform "
-            "1/N. Pass MBAR weights explicitly for biased sampling."
-        )
-
-    samples = jnp.asarray(samples)
-
-    # --- Basin masks ---
-    if in_A is None:
-        in_A = ctx.in_A
-    if in_B is None:
-        in_B = ctx.in_B
-    in_A_arr = jnp.asarray(in_A).astype(bool)
-    in_B_arr = jnp.asarray(in_B).astype(bool)
-
-    # --- Distances to A/B ---
-    if dist_to_A is None or dist_to_B is None:
-        raise ValueError(
-            "thin_shell_bcm_weights requires dist_to_A and dist_to_B to be "
-            "supplied as (N,) arrays. Geometric distance utilities are "
-            "outside the library scope; compute them from your samples and "
-            "basin definitions (e.g. via scipy.spatial.distance) and pass "
-            "them explicitly."
-        )
-    dist_to_A = jnp.asarray(dist_to_A)
-    dist_to_B = jnp.asarray(dist_to_B)
-
-    # --- Define the δ-shells over out-of-state samples ---
-    out_A_mask = ~in_A_arr
-    out_B_mask = ~in_B_arr
-    n_out_A = int(jnp.sum(out_A_mask))
-    n_out_B = int(jnp.sum(out_B_mask))
-    if n_out_A == 0:
-        raise ValueError("thin_shell_bcm_weights: no out-of-A samples; cannot define A_δ.")
-    if n_out_B == 0:
-        raise ValueError("thin_shell_bcm_weights: no out-of-B samples; cannot define B_δ.")
-
-    # Quantile is computed over out-of-state distances only; in-state
-    # samples have dist = 0 and would otherwise pull the quantile down.
-    out_A_dist = jnp.where(out_A_mask, dist_to_A, jnp.inf)
-    out_B_dist = jnp.where(out_B_mask, dist_to_B, jnp.inf)
-    sorted_dist_A = jnp.sort(out_A_dist)
-    sorted_dist_B = jnp.sort(out_B_dist)
-    # Index ⌈δ·N_out⌉ − 1 (clamped) into the ascending sorted distances.
-    idx_A = max(0, int(np.ceil(delta * n_out_A)) - 1)
-    idx_B = max(0, int(np.ceil(delta * n_out_B)) - 1)
-    thresh_A = float(sorted_dist_A[idx_A])
-    thresh_B = float(sorted_dist_B[idx_B])
-
-    in_A_delta = out_A_mask & (dist_to_A <= thresh_A)
-    in_B_delta = out_B_mask & (dist_to_B <= thresh_B)
-    n_A_delta = int(jnp.sum(in_A_delta))
-    n_B_delta = int(jnp.sum(in_B_delta))
-    if n_A_delta == 0 or n_B_delta == 0:
-        raise ValueError(
-            f"thin_shell_bcm_weights: empty shell after threshold "
-            f"(n_A_δ={n_A_delta}, n_B_δ={n_B_delta}). "
-            f"Increase δ or check distance/basin definitions."
-        )
-
-    # --- Projected samples and Gram (mirror full_gram_weights setup) ---
-    if ctx.projected_samples is not None:
-        projected_samples = ctx.projected_samples
-        eps_ctx = ctx
-    else:
-        projected_samples = ctx.directions @ samples.T
-        eps_ctx = ctx._replace(projected_samples=projected_samples)
-
-    N = projected_samples.shape[1]
-    W = sample_weights if sample_weights is not None else jnp.ones(N) / N
-
-    F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
-    matmul_dtype = jnp.dtype(gram_dtype)
-    F_lo = F.astype(matmul_dtype)
-    W_lo = jnp.asarray(W).astype(matmul_dtype)
-    G, H = _assemble_gram_and_inner(F_lo, W_lo, cos_matrix)
-
-    # --- ε vector (only for σ_M; not used in the constraint structure) ---
-    cache_matches = epsilon_fn is None and _sample_weights_match(sample_weights, ctx.sample_weights)
-    if cache_matches and ctx.boundary_errors is not None and not clamp_epsilon:
-        epsilon = ctx.boundary_errors
-    else:
-        epsilon = compute_epsilon(
-            eps_ctx,
-            sample_weights=sample_weights,
-            epsilon_fn=epsilon_fn,
-            clamp=clamp_epsilon,
-        )
-    b_vec = 1.0 - epsilon
-
-    # --- Basin moments on the δ-shells ---
-    Q_samples = _interpolate_q_at_all_samples(
-        ctx.slice_coords,
-        ctx.committors_1d,
-        projected_samples,
-    )  # (M, N), slice committors at each sample, clipped to [0, 1]
-
-    W_arr = jnp.asarray(W)
-    w_A_shell = jnp.where(in_A_delta, W_arr, 0.0)
-    w_B_shell = jnp.where(in_B_delta, W_arr, 0.0)
-    wA_sum = jnp.sum(w_A_shell)
-    wB_sum = jnp.sum(w_B_shell)
-    # Both denominators are > 0 by the empty-shell check above.
-    a_delta = (Q_samples * w_A_shell[None, :]).sum(axis=1) / jnp.maximum(wA_sum, 1e-30)
-    b_delta = (Q_samples * w_B_shell[None, :]).sum(axis=1) / jnp.maximum(wB_sum, 1e-30)
-
-    # --- Solve the multi-constraint KKT (k = 2) ---
-    A_constraint = jnp.stack([a_delta, b_delta], axis=0)  # (2, M)
-    c_constraint = jnp.array([0.0, 1.0], dtype=G.dtype)
-
-    solve_out = _solve_multi_constraint_gram(
-        G,
-        A_constraint,
-        c_constraint,
-        b_vec,
-        ctx.valid_mask,
-        eta=tikhonov,
-        sample_weights=sample_weights,
-        N=N,
-        compute_condition_number=compute_condition_number,
-    )
-
-    result = {
-        **solve_out,
-        "G": G,
-        "H": H,
-        "b": b_vec,
-        "a_delta": a_delta,
-        "b_delta": b_delta,
-        "delta": float(delta),
-        "n_A_delta": n_A_delta,
-        "n_B_delta": n_B_delta,
-        "dist_threshold_A": thresh_A,
-        "dist_threshold_B": thresh_B,
-        "constraint": "thin_shell_bcm",
-    }
-
-    if result["constraint_residual"] > 1e-5:
-        logger.warning(
-            f"thin_shell_bcm_weights: ‖A w − c‖∞ = "
-            f"{result['constraint_residual']:.3g} > 1e-5. The KKT solve "
-            f"left a non-trivial residual; check Tikhonov scaling or "
-            f"M_λ conditioning (cond={result['condition_number_M_lambda']})."
-        )
-
-    return result
-
-
-# ===========================================================================
-# GFI RESIDUAL DIAGNOSTICS (Item B from the optimal-weights document)
-# ===========================================================================
-#
-# These functions implement the GFI-derived diagnostics that decompose the
-# Dirichlet residual E(w*) into a BC-shrinkage piece (ε̄*)²D[q] and a basis-gap
-# piece D[r] (orthogonal in the Dirichlet inner product). The residual
-# decomposition uses three computable quantities:
-#
-#   D[q̄*]  = w*ᵀ G w*                       (Dirichlet energy of the sliced
-#                                              approximation, exact from G, w*)
-#   σ_M    = 1 / ((1−ε)ᵀ G⁻¹ (1−ε))         (GFI upper bound on D[q])
-#   α_D    ≈ μ_B[q̄*] − μ_A[q̄*]              (Dirichlet-projection slope estimator
-#                                              via basin-conditional separation)
-#
-# and yields the bound
-#
-#   D[r] ≥ D[q̄*] − α_D² · σ_M
-#
-# which is the certified basis-gap piece: the residual that direction
-# enrichment can remove. The complement α_D²·σ_M upper-bounds the
-# BC-shrinkage piece (the part attributable to basin-mean shrinkage rather
-# than basis incompleteness).
-# Use ``eta_basis = D[r]_lower / D[q̄*]`` as a diagnostic: small ⇒ residual
-# is shrinkage-dominated, large ⇒ enrich directions.
-# ===========================================================================
-
-
-def compute_alpha_d_sepdist(q_bar_samples, in_A, in_B, sample_weights=None) -> float:
-    """Basin-conditional separation estimator of the Dirichlet-projection slope.
-
-    Estimates α_D ≈ ⟨∇q̄, ∇q⟩_μ / D[q] by the basin-conditional separation
-
-        α_D ≈ μ_B[q̄] − μ_A[q̄]
-
-    For the true committor q this is exactly 1 (since q|_A = 0, q|_B = 1);
-    for any q̄ ∈ span{slice committors} it tracks the alignment of q̄'s
-    level sets with q's. This is the ``θ²_sepdist`` form referenced in the
-    optimal-weights document. The calibrated variant (which absorbs a
-    bias correction from incomplete basin coverage) is deferred.
-
-    Args:
-        q_bar_samples: (N,) the sliced committor evaluated at samples.
-        in_A, in_B: (N,) boolean basin masks for the same samples.
-        sample_weights: (N,) optional MBAR weights; if None, uniform 1/N.
-
-    Returns:
-        α_D as a Python float. Returns 0.0 if either basin has zero
-        (weighted) sample count.
-    """
-    q = jnp.asarray(q_bar_samples)
-    in_A = jnp.asarray(in_A).astype(bool)
-    in_B = jnp.asarray(in_B).astype(bool)
-
-    if sample_weights is None:
-        w_A_sum = jnp.sum(in_A.astype(q.dtype))
-        w_B_sum = jnp.sum(in_B.astype(q.dtype))
-        mean_A = jnp.where(
-            w_A_sum > 0, jnp.sum(jnp.where(in_A, q, 0.0)) / jnp.maximum(w_A_sum, 1.0), 0.0
-        )
-        mean_B = jnp.where(
-            w_B_sum > 0, jnp.sum(jnp.where(in_B, q, 0.0)) / jnp.maximum(w_B_sum, 1.0), 0.0
-        )
-    else:
-        W = jnp.asarray(sample_weights)
-        w_A = jnp.where(in_A, W, 0.0)
-        w_B = jnp.where(in_B, W, 0.0)
-        w_A_sum = jnp.sum(w_A)
-        w_B_sum = jnp.sum(w_B)
-        mean_A = jnp.where(w_A_sum > 0, jnp.sum(w_A * q) / jnp.maximum(w_A_sum, 1e-30), 0.0)
-        mean_B = jnp.where(w_B_sum > 0, jnp.sum(w_B * q) / jnp.maximum(w_B_sum, 1e-30), 0.0)
-
-    if float(w_A_sum) <= 0.0 or float(w_B_sum) <= 0.0:
-        return 0.0
-    return float(mean_B - mean_A)
-
-
-def compute_residual_decomposition(
-    gram_result, q_bar_samples, in_A, in_B, sample_weights=None
-) -> dict[str, float]:
-    """GFI-anchored decomposition of the Dirichlet residual at the optimum.
-
-    Decomposes E(w*) = D[q̄* − q] into
-
-        (ε̄*)² · D[q]   (BC-shrinkage piece, from basin-mean shrinkage)
-        D[r]            (basis-gap piece, removable only by direction enrichment)
-
-    via the (B) lower bound D[r] ≥ D[q̄*] − α_D² · σ_M, where σ_M is the GFI
-    upper bound on D[q] (already in ``gram_result['sigma_M']``) and α_D is
-    estimated by :func:`compute_alpha_d_sepdist`.
-
-    Use ``eta_basis`` ∈ [0, 1] as a diagnostic:
-      * ``eta_basis`` near 1 ⇒ residual is dominated by basis incompleteness;
-        adding directions (Components C, D) will help.
-      * ``eta_basis`` near 0 ⇒ residual is dominated by BC-shrinkage.
-
-    Args:
-        gram_result: dict from :func:`full_gram_weights` (must contain ``'w'``,
-            ``'G'``, and ``'sigma_M'``).
-        q_bar_samples: (N,) sliced committor evaluated at the same samples
-            used to fit the Gram (typically
-            ``evaluate_committor(result, samples, weights)``).
-        in_A, in_B: (N,) boolean basin masks for samples.
-        sample_weights: (N,) optional MBAR weights for α_D.
-
-    Returns:
-        dict with keys:
-            ``D_bar_q``: D[q̄*] = w*ᵀ G w* (exact).
-            ``sigma_M``: GFI upper bound on D[q] (from gram_result).
-            ``alpha_D``: Dirichlet-projection slope estimator (sepdist).
-            ``D_r_lower``: (B) lower bound on D[r] = D[q̄*] − α_D² σ_M,
-                clamped non-negative.
-            ``D_bc_shrinkage_upper``: D[q̄*] − D_r_lower; equals α_D² σ_M
-                when D_r_lower is the unclamped bound. Upper bound on
-                the BC-shrinkage piece.
-            ``eta_basis``: D_r_lower / D[q̄*] ∈ [0, 1]; fraction of the
-                residual *certified* to be basis-gap.
-
-    Notes:
-        * D_r_lower can be 0 if σ_M is loose enough that α_D²·σ_M ≥ D[q̄*];
-          this is inconclusive (the residual may still be partly basis-gap,
-          but the bound is not tight enough to certify it).
-        * Units track ``gram_result['sigma_M']``: invariant under uniform
-          rescaling of the empirical measure, so ratios like ``eta_basis``
-          are dimensionless.
-    """
-    if "w" not in gram_result or "G" not in gram_result:
-        raise ValueError(
-            "compute_residual_decomposition requires 'w' and 'G' in "
-            "gram_result. Call full_gram_weights with return_overlap=False "
-            "(the default), which still populates G."
-        )
-    if "sigma_M" not in gram_result:
-        raise ValueError(
-            "compute_residual_decomposition requires 'sigma_M' in "
-            "gram_result. Re-run full_gram_weights after the GFI patch."
-        )
-
-    w = jnp.asarray(gram_result["w"])
-    G = jnp.asarray(gram_result["G"])
-    sigma_M = float(gram_result["sigma_M"])
-
-    D_bar_q = float(w @ (G @ w))
-    alpha_D = compute_alpha_d_sepdist(q_bar_samples, in_A, in_B, sample_weights)
-
-    D_r_lower_raw = D_bar_q - alpha_D**2 * sigma_M
-    D_r_lower = max(0.0, D_r_lower_raw)
-    D_bc_shrinkage_upper = D_bar_q - D_r_lower
-    eta_basis = D_r_lower / D_bar_q if D_bar_q > 1e-30 else 0.0
-
-    return {
-        "D_bar_q": D_bar_q,
-        "sigma_M": sigma_M,
-        "alpha_D": alpha_D,
-        "D_r_lower": D_r_lower,
-        "D_r_lower_raw": float(D_r_lower_raw),
-        "D_bc_shrinkage_upper": D_bc_shrinkage_upper,
-        "eta_basis": float(eta_basis),
-    }
 
 
 # ===========================================================================

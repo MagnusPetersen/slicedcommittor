@@ -7,7 +7,6 @@ computed by the monorepo at β=1 and asserts that the new label-only API
 reproduces every output to machine precision.
 """
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
