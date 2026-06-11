@@ -177,9 +177,9 @@ def dirichlet_rate(
         samples: ``(N, dim)`` static ensemble.
         D: scalar, callable ``level -> D``, or a diffusion :class:`Profile`.
         at: ``None`` -> volume integral D⟨|∇q̄|²⟩_π; ``(lo, hi)`` -> bin-free
-            co-area plateau flux over that committor range; ``"auto"`` -> the
-            flux-flatness plateau located by :func:`find_plateau`; scalar ->
-            co-area flux density Φ(q*) at the point.
+            co-area plateau flux over that committor range (requires ``lo < hi``);
+            ``"auto"`` -> the flux-flatness plateau located by
+            :func:`find_plateau`; scalar -> co-area flux density Φ(q*) at the point.
         sample_weights, in_A, in_B: weighting and basin masks for populations.
         n_bins: resolution of the Φ(c) diagnostic profile (the plateau flux
             itself is bin-free).
@@ -192,24 +192,26 @@ def dirichlet_rate(
     """
     levels, contrib = _coarea_contributions(committor, samples, D, sample_weights)
     rho_A, rho_B = _populations(committor, samples, sample_weights, in_A, in_B)
-    if at == "auto":
-        centers, Phi, counts = _coarea_profile(levels, contrib, n_bins)
-        pw = find_plateau(Profile(levels=centers, values=Phi, counts=counts))
-        nu_R = _plateau_flux(levels, contrib, pw.lo, pw.hi)
-        report = _plateau_report(centers, Phi, counts, pw.lo, pw.hi)
-        return _rate_dict(
-            rho_A, rho_B, nu_R=nu_R, kind="auto", plateau_auto=True, plateau_ok=pw.ok, **report
-        )
     if at is None:
         nu_R = float(np.sum(contrib))  # volume integral D⟨|∇q̄|²⟩_π
         return _rate_dict(rho_A, rho_B, nu_R=nu_R, kind="full")
+    # The auto / range / point forms all read the Φ(c) diagnostic profile; build
+    # it once here rather than once per branch.
+    centers, Phi, counts = _coarea_profile(levels, contrib, n_bins)
+    if at == "auto":
+        pw = find_plateau(Profile(levels=centers, values=Phi, counts=counts))
+        nu_R = _plateau_flux(levels, contrib, pw.lo, pw.hi)
+        # Use the plateau's own flatness (consistent with the window find_plateau
+        # selected) instead of recomputing on a differently-filtered subset.
+        report = {"plateau": (pw.lo, pw.hi), "plateau_flatness": pw.flatness}
+        return _rate_dict(
+            rho_A, rho_B, nu_R=nu_R, kind="auto", plateau_auto=True, plateau_ok=pw.ok, **report
+        )
     if _is_range(at):
         lo, hi = float(at[0]), float(at[1])
         nu_R = _plateau_flux(levels, contrib, lo, hi)
-        centers, Phi, counts = _coarea_profile(levels, contrib, n_bins)
         report = _plateau_report(centers, Phi, counts, lo, hi)
         return _rate_dict(rho_A, rho_B, nu_R=nu_R, kind="range", **report)
-    centers, Phi, counts = _coarea_profile(levels, contrib, n_bins)
     good = counts > 0
     nu_R = float(np.interp(float(at), centers[good], Phi[good])) if np.any(good) else float("nan")
     return _rate_dict(rho_A, rho_B, nu_R=nu_R, kind="point", q_star=float(at))
@@ -232,10 +234,10 @@ def tpt_rate(
         committor, samples, D: see :func:`reactive_flux`. Pass a
             :class:`~sliced_committor.rates.quantities.BridgeD` (from
             :func:`saddle_bridge_D`) as ``D`` for the calibrated geometric rate.
-        at: ``(lo, hi)`` plateau (default) -> bin-free plateau-MC flux plus a
-            flatness diagnostic; ``"auto"`` -> the flux-flatness plateau located
-            by :func:`find_plateau` (adds ``plateau_auto``/``plateau_ok``);
-            scalar -> Φ(q*) at a single surface.
+        at: ``(lo, hi)`` plateau (default, requires ``lo < hi``) -> bin-free
+            plateau-MC flux plus a flatness diagnostic; ``"auto"`` -> the
+            flux-flatness plateau located by :func:`find_plateau` (adds
+            ``plateau_auto``/``plateau_ok``); scalar -> Φ(q*) at a single surface.
         sample_weights, in_A, in_B: populations weighting/masks.
         n_bins: resolution of the Φ(c) diagnostic profile (the plateau flux
             itself is bin-free).
@@ -251,10 +253,16 @@ def tpt_rate(
     extra = {}
     if at == "auto":
         pw = find_plateau(Profile(levels=centers, values=Phi, counts=counts))
-        at = (pw.lo, pw.hi)
-        extra["plateau_auto"] = True
-        extra["plateau_ok"] = pw.ok
-    if _is_range(at):
+        lo, hi = pw.lo, pw.hi
+        nu_R = _plateau_flux(levels, contrib, lo, hi)
+        # Plateau's own flatness, consistent with the window find_plateau picked.
+        extra = {
+            "plateau": (lo, hi),
+            "plateau_flatness": pw.flatness,
+            "plateau_auto": True,
+            "plateau_ok": pw.ok,
+        }
+    elif _is_range(at):
         lo, hi = float(at[0]), float(at[1])
         nu_R = _plateau_flux(levels, contrib, lo, hi)
         extra.update(_plateau_report(centers, Phi, counts, lo, hi))
@@ -552,6 +560,14 @@ def committor_rate(
             lo, hi = (0.3, 0.7) if at is None else (float(at[0]), float(at[1]))
         sel = finite & (centers >= lo) & (centers <= hi) & (pi > 0)
         nu_R = float(np.median(flux[sel])) if np.any(sel) else float("nan")
+        if at != "auto":
+            # Explicit-range flatness (auto already reports the plateau's own),
+            # so plateau_flatness is present for every plateau call -- matching
+            # dirichlet_rate / tpt_rate.
+            vals = flux[sel]
+            extra["plateau_flatness"] = (
+                float(np.std(vals) / max(abs(np.mean(vals)), 1e-30)) if vals.size else float("nan")
+            )
         return _rate_dict(rho_A, rho_B, nu_R=nu_R, reduction="plateau", plateau=(lo, hi), **extra)
 
     if red == "local":

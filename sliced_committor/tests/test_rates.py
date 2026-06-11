@@ -164,6 +164,15 @@ def test_dirichlet_plateau_keys_are_flat_and_consistent(committor):
     assert full["kind"] == "full" and "plateau" not in full
 
 
+def test_plateau_zero_width_range_raises(committor):
+    # §1.2 guard: a degenerate at=(c, c) range has no well-defined plateau flux.
+    q, s, in_A, in_B = committor
+    with pytest.raises(ValueError, match="lo < hi"):
+        sc.dirichlet_rate(q, s, D=0.05, at=(0.5, 0.5), in_A=in_A, in_B=in_B)
+    with pytest.raises(ValueError, match="lo < hi"):
+        sc.tpt_rate(q, s, D=0.05, at=(0.4, 0.4), in_A=in_A, in_B=in_B)
+
+
 # ---------------------------------------------------------------------------
 # Trajectory-based rates: Berezhkovskii-Szabo + Kramers
 # ---------------------------------------------------------------------------
@@ -310,6 +319,18 @@ def test_committor_rate_unknown_reduction_raises(committor_and_trajectory):
     q, s, in_A, in_B, traj = committor_and_trajectory
     with pytest.raises(ValueError, match="unknown reduction"):
         sc.committor_rate(q, s, traj, dt=0.01, reduction="bogus", n_bins=50)
+
+
+def test_committor_rate_plateau_reports_flatness_for_explicit_range(committor_and_trajectory):
+    # §1.4: plateau_flatness must be present for an explicit range too (it was
+    # previously only added in the at="auto" branch), matching dirichlet/tpt.
+    q, s, in_A, in_B, traj = committor_and_trajectory
+    for at in (None, (0.3, 0.7)):
+        out = sc.committor_rate(
+            q, s, traj, dt=0.01, reduction="plateau", at=at, n_bins=50, in_A=in_A, in_B=in_B
+        )
+        assert "plateau_flatness" in out
+        assert np.isfinite(out["plateau_flatness"])
 
 
 # ---------------------------------------------------------------------------

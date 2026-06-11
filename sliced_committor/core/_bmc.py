@@ -42,7 +42,6 @@ simplex solver.
 """
 
 import logging
-from typing import Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -52,7 +51,7 @@ from .gram import (
     _compute_derivative_matrix,
     compute_shared_gram_diagnostics,
 )
-from .weights import _interpolate_q_at_samples_masked, _resolve_eta
+from .weights import _interpolate_q_at_samples_masked, _mask_and_regularize_gram, _resolve_eta
 
 logger = logging.getLogger(__name__)
 
@@ -153,18 +152,8 @@ def _solve_basin_moment_kkt(G, a, b, valid_mask, eta_val):
     Returns a dict of JAX arrays. The Python wrapper handles eta='auto' and
     the BMCRepresentationError gate.
     """
-    M = G.shape[0]
     valid = valid_mask.astype(G.dtype)
-
-    # Mask invalid directions: zero rows/cols, identity on diagonal
-    mask_2d = valid[:, None] * valid[None, :]
-    G_masked = G * mask_2d + jnp.diag(1.0 - valid)
-
-    # Adaptive Tikhonov: η × median(valid diagonal entries)
-    G_diag_valid = jnp.where(valid > 0, jnp.diag(G_masked), jnp.inf)
-    med_diag = jnp.median(G_diag_valid)
-    med_diag = jnp.where(jnp.isfinite(med_diag) & (med_diag > 0), med_diag, 1.0)
-    G_reg = G_masked + eta_val * med_diag * jnp.eye(M)
+    G_reg, _med_diag = _mask_and_regularize_gram(G, valid_mask, eta_val)
 
     a_m = a * valid
     b_m = b * valid

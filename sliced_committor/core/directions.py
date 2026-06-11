@@ -34,7 +34,7 @@ Helper: ``compute_lda_axis`` for the LDA bias direction.
 import warnings
 from collections.abc import Sequence
 from functools import partial
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -77,11 +77,12 @@ class DirectionSamplingConfig(NamedTuple):
         n_bias_axes: K, number of bias axes for the geometric modes
             (``'pca'``, ``'gcpca'``); ignored by ``'uniform'`` and
             ``'lda'``. Default 4.
-        pca_variant: ``'top'`` (largest variance) | ``'bottom'`` (smallest
-            variance; unsupervised slow-mode analogue).
-        gcpca_background: ``'bulk'`` = samples outside ``A ∪ B``;
+        pca_variant: ``'top'`` (largest variance, default) | ``'bottom'``
+            (smallest variance; unsupervised slow-mode analogue).
+        gcpca_background: ``'bulk'`` = samples outside ``A ∪ B`` (default);
             ``'all'`` = all samples.
-        gcpca_ridge: numerical ridge on ``C_t + C_bg``.
+        gcpca_ridge: trace-relative numerical ridge on ``C_t + C_bg``:
+            ``η = gcpca_ridge · trace(C_t + C_bg) / dim``. Default 1e-6.
         axis: Optional user-supplied unit axis; skips axis computation
             (only honoured by ``mode='lda'``).
         axis_weights: Optional (K,) mixture weights over informed axes
@@ -225,8 +226,7 @@ def _sample_power_spherical(
 
     z = random.normal(key_w, shape=(n, dim))
     z_perp = z - (z @ axis)[:, None] * axis[None, :]
-    z_perp_norm = jnp.linalg.norm(z_perp, axis=-1, keepdims=True)
-    w = z_perp / jnp.maximum(z_perp_norm, 1e-10)
+    w = _normalize_rows(z_perp, eps=1e-10)
 
     sqrt_1mt2 = jnp.sqrt(jnp.maximum(1.0 - t * t, 0.0))
     return t[:, None] * axis[None, :] + sqrt_1mt2[:, None] * w
@@ -283,7 +283,7 @@ def sample_power_spherical_mixture(
             "sample_power_spherical_mixture: renormalizing bias_axes rows (norm deviation > 1e-4).",
             stacklevel=2,
         )
-    bias_axes = bias_axes / jnp.maximum(norms[:, None], 1e-12)
+    bias_axes = _normalize_rows(bias_axes, eps=1e-12)
 
     K = int(bias_axes.shape[0])
 
@@ -532,7 +532,6 @@ def pca_basis(
     K: int,
     *,
     variant: str = "top",
-    center: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray, dict[str, Any]]:
     """Top-K or bottom-K principal-component axes of ``samples``.
 
@@ -544,9 +543,6 @@ def pca_basis(
             the K eigenvectors with the smallest variance (unsupervised
             analogue of TICA's slow modes in the zero-lag limit; the
             directions along which the sample cloud is tightest).
-        center: subtract the sample mean before forming the covariance
-            (default True). Set False when ``samples`` is already centered
-            or when you want raw second-moment eigenvectors.
 
     Returns:
         ``(axes, eigvals, info)`` where ``axes`` is ``(K, dim)`` unit-norm,
@@ -555,7 +551,7 @@ def pca_basis(
     """
     X = jnp.asarray(samples)
     N, dim = X.shape
-    Xc = X - X.mean(axis=0, keepdims=True) if center else X
+    Xc = X - X.mean(axis=0, keepdims=True)
 
     _, S, Vt = jnp.linalg.svd(Xc, full_matrices=False)
     eigvals_full = (S * S) / max(N - 1, 1)
@@ -615,7 +611,6 @@ def gcpca_basis(
     *,
     background: str = "bulk",
     ridge: float = 1e-6,
-    center: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray, dict[str, Any]]:
     """Top-K generalised contrastive PCA axes of ``A ∪ B`` against background.
 
@@ -630,7 +625,6 @@ def gcpca_basis(
         background: ``'bulk'`` (default) = samples outside ``A ∪ B``;
             ``'all'`` = all samples (standard cPCA convention).
         ridge: numerical stabiliser; ``η = ridge · trace(C_t + C_bg) / dim``.
-        center: subtract per-class mean before forming covariances.
 
     Returns:
         ``(axes, eigvals, info)``. ``axes`` is ``(K, dim)`` unit-norm.
@@ -658,9 +652,8 @@ def gcpca_basis(
             f"got n_target={n_t}, n_background={n_b}."
         )
 
-    if center:
-        X_t = X_t - X_t.mean(axis=0, keepdims=True)
-        X_b = X_b - X_b.mean(axis=0, keepdims=True)
+    X_t = X_t - X_t.mean(axis=0, keepdims=True)
+    X_b = X_b - X_b.mean(axis=0, keepdims=True)
 
     dim = X.shape[1]
     C_t = (X_t.T @ X_t) / max(n_t - 1, 1)
@@ -735,6 +728,14 @@ def _color_normalize_directions(
     """
     d = V.shape[0]
     w = jnp.maximum(mu, 0.0)
+    if not bool(jnp.any(w > 0)):
+        warnings.warn(
+            "all generalized eigenvalues are non-positive (noise-dominated TICA "
+            "solution); there are no slow modes to color. Falling back to uniform "
+            "directions on the sphere.",
+            stacklevel=2,
+        )
+        return directions_uniform(key, M, d)
     q = random.normal(key, shape=(M, d), dtype=V.dtype)
     return _normalize_rows((q * w[None, :]) @ V.T)
 
@@ -840,7 +841,7 @@ def _ema_covariances(
     """
     trajs = _normalize_traj_input(samples)
     K = len(trajs)
-    d = trajs[0].shape[-1]
+    trajs[0].shape[-1]
     dtype = trajs[0].dtype
 
     Ns = [int(t.shape[0]) for t in trajs]
@@ -876,7 +877,12 @@ def _solve_ema_gep(
     ridge: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Solve the generalized eigenproblem ``sym(M_a) v = μ C₀ v`` via
-    Cholesky whitening.
+    Cholesky whitening of ``C₀ + ridge·I``.
+
+    ``ridge`` here is the ABSOLUTE additive constant (in C₀'s units). Callers
+    that expose a trace-relative ridge (``directions_tica_ema``, matching
+    LDA / gcPCA) pre-scale by ``tr(C₀)/d`` before calling; the decomposed
+    factory passes its tuned absolute whitening ridge straight through.
 
     Returns ``(V, mu)`` where ``V[:, k]`` is the k-th generalized eigenvector
     (columns ordered by decreasing μ_k) and ``mu`` are the eigenvalues.
@@ -907,12 +913,16 @@ def _tica_ema_basis(
     every trajectory boundary; the aggregated estimators use a shared
     decay ``α = alpha_ratio / N_mean`` with ``N_mean = N_total / K``.
 
+    ``ridge`` is trace-relative (``η = ridge · tr(C0)/d``), matching the
+    LDA / gcPCA convention so a ridge value ports across those factories.
+
     Returns ``(V, mu)`` where ``V[:, k]`` is the k-th generalized eigenvector
     (columns ordered by decreasing μ_k) and ``mu`` are the eigenvalues.
     Shared by ``directions_tica_ema`` and downstream diagnostics.
     """
     C0, M_a = _ema_covariances(samples, alpha_ratio)
-    return _solve_ema_gep(C0, M_a, ridge)
+    eta = float(ridge) * float(jnp.trace(C0)) / max(C0.shape[0], 1)
+    return _solve_ema_gep(C0, M_a, eta)
 
 
 def directions_tica_ema(
@@ -951,7 +961,9 @@ def directions_tica_ema(
             timescale being probed, not of the dataset size, so adding
             more replicas of the same length reduces variance without
             sliding the kernel toward slower modes.
-        ridge: stabilising ridge on C(0) for the Cholesky.
+        ridge: trace-relative stabilising ridge on C(0) for the Cholesky
+            whitening: ``η = ridge · tr(C0)/d`` (the LDA / gcPCA convention, so
+            a ridge value ports across those factories). Default 1e-6.
 
     Returns:
         ``(M, dim)`` unit-norm rows.
@@ -1124,6 +1136,15 @@ def _tica_ema_decomposed_basis(
     tr_Cb = jnp.trace(C_between)
     eps = jnp.asarray(1e-30, dtype=C_between.dtype)
     beta = tr_Mw / jnp.maximum(tr_Cb, eps)
+    if float(beta) > 1e6:
+        warnings.warn(
+            "directions_tica_ema_decomposed: between-window variance is near zero "
+            f"(tr(C_between) ≈ 0), so the trace-matching scale beta = {float(beta):.3g} "
+            "is very large and can amplify noise in the slow-mode estimate. Inspect "
+            "the returned diagnostics['beta']; consider fewer/merged windows or "
+            "different features.",
+            stacklevel=2,
+        )
     M_slow = M_within + beta * C_between
 
     V, mu = _solve_ema_gep(C0_MBAR, M_slow, ridge)
@@ -1172,7 +1193,12 @@ def directions_tica_ema_decomposed(
             (the MBAR normalization); per-window sums ``W_k`` need not be
             uniform. Windows with ``W_k = 0`` (unsampled) are silently
             skipped.
-        ridge: stabilising ridge on ``C0_MBAR`` for the Cholesky whitening.
+        ridge: ABSOLUTE additive whitening ridge on ``C0_MBAR`` (forms
+            ``C0_MBAR + ridge·I``), in C0_MBAR's eigenvalue units. This is a
+            tuned whitening hyperparameter (default 2.0; see the note above),
+            NOT the trace-relative ``η = ridge·tr/d`` ridge used by
+            ``directions_tica_ema`` / LDA / gcPCA -- a ridge value does not
+            port between them.
 
     Returns:
         ``(M, dim)`` unit-norm rows. Linear coloring with

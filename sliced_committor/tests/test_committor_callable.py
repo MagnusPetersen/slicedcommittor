@@ -60,6 +60,23 @@ def test_build_matches_internal_evaluator(fit):
     np.testing.assert_allclose(a, b, atol=1e-9, rtol=0)
 
 
+@pytest.mark.parametrize("solver", ["full_gram", "bmc"])
+def test_build_matches_internal_evaluator_array_path(fit, solver):
+    """build_committor's linear array combiner must match the internal log-space
+    evaluator for full_gram / bmc weights -- the path the EBMC (centered) check
+    above never exercises. Same result + weights, so any divergence is real."""
+    s, in_A, in_B, _, det = fit
+    w = (
+        sc.compute_full_gram_weights(det.result, s)
+        if solver == "full_gram"
+        else sc.compute_basin_moment_weights(det.result, s)
+    )
+    q2 = sc.build_committor(det.result, w, enforce_boundary_conditions=False)
+    a = np.asarray(q2(s[:60]))
+    b = np.asarray(_evaluate_reference(det.result, s[:60], w, enforce_boundary_conditions=False))
+    np.testing.assert_allclose(a, b, atol=1e-8, rtol=0)
+
+
 def test_fit_roundtrip_matches_build(fit):
     s, in_A, in_B, q, det = fit
     q2 = sc.build_committor(det.result, det.weights)

@@ -26,6 +26,7 @@ import jax.numpy as jnp
 
 from .solver import (
     SlicedCommittorResult,
+    _apply_boundary_conditions,
     _evaluate_centered_from_qall,
     _evaluate_powered_smoothstep_from_qall,
     _qall_onthefly,
@@ -47,14 +48,17 @@ class CommittorFit(NamedTuple):
     ``committor`` is the callable ``q(x)``; ``result`` and ``weights`` are the
     underlying :class:`SlicedCommittorResult` and weight array/dict, kept for
     diagnostics (``result.summary()``, ``why_masked``,
-    ``summarize_gram_diagnostics``). Everything else a caller might want
-    (per-sample committor, Dirichlet energy, masked-slice reasons) is derivable
-    from these two.
+    ``summarize_gram_diagnostics``). ``dirichlet_energy`` is the variational
+    objective 𝓓[q̂] of the recombined committor (see
+    :func:`committor_dirichlet_energy`), a label-free relative quality ranker
+    (lower = closer to the true committor). Anything else a caller might want
+    (per-sample committor, masked-slice reasons) is derivable from ``result``.
     """
 
     committor: Callable
     result: SlicedCommittorResult
     weights: Weights
+    dirichlet_energy: float | None = None
 
 
 # Weight-solver registry for the ``weights=`` string shortcut in fit_committor.
@@ -70,8 +74,10 @@ _DIAGONAL_ALIASES = {"diagonal", "corrected_dirichlet_inv_rd", "rd"}
 def _resolve_combiner(weights: Weights):
     """Resolve a weight array/dict into ``(kind, payload)`` for recombination.
 
-    Mirrors the dispatch precedence of the solver's evaluator:
-    PESB smoothstep > centered-basis (EBMC) > raw ``w`` / log-space.
+    Classifies the weights into the recombination ansatz, in precedence order:
+    PESB smoothstep > centered-basis (EBMC) > plain array. The array path uses
+    the linear normalised combiner ``(Σ wⱼ qⱼ) / Σ wⱼ``, which equals the
+    solver's signed-logsumexp evaluator up to floating-point round-off.
     """
     if isinstance(weights, dict):
         if "w_by_power" in weights and "n_values" in weights:
@@ -95,6 +101,18 @@ def _resolve_combiner(weights: Weights):
             "'w', 'c'/'q_bar', 'w_by_power'+'n_values', or 'sign_w'+'log_abs_w'."
         )
     return "array", jnp.asarray(weights)
+
+
+def _energy_basis(weights) -> str:
+    """Which formula :func:`committor_dirichlet_energy` uses for these weights.
+
+    ``"gram"`` for the Gram-family solvers (a dict carrying ``G``: ebmc / pesb /
+    bmc / full_gram), whose energy is the true ``wᵀG w``; ``"diagonal"`` for the
+    diagonal RD / bare-array solver, whose energy is the smaller-scale diagonal
+    approximation. Ranking the ``"dirichlet"`` energy across the two is not
+    valid. Shared by :func:`committor_dirichlet_energy` and the sweep selector.
+    """
+    return "gram" if isinstance(weights, dict) and "G" in weights else "diagonal"
 
 
 def build_committor(
@@ -156,25 +174,9 @@ def build_committor(
         if clip:
             q_res = jnp.clip(q_res, 0.0, 1.0)
         if enforce_boundary_conditions and (in_A is not None or in_B is not None):
-            mask_A = (
-                jnp.asarray(in_A).reshape(original_shape)
-                if in_A is not None
-                else jnp.zeros(original_shape, dtype=bool)
+            q_res = _apply_boundary_conditions(
+                q_res, in_A, in_B, original_shape, rescale_transition
             )
-            mask_B = (
-                jnp.asarray(in_B).reshape(original_shape)
-                if in_B is not None
-                else jnp.zeros(original_shape, dtype=bool)
-            )
-            if rescale_transition:
-                in_trans = ~mask_A & ~mask_B
-                q_trans = jnp.where(in_trans, q_res, jnp.nan)
-                span = jnp.maximum(jnp.nanmax(q_trans) - jnp.nanmin(q_trans), 1e-10)
-                q_res = jnp.where(in_trans, (q_res - jnp.nanmin(q_trans)) / span, q_res)
-            if in_A is not None:
-                q_res = jnp.where(mask_A, 0.0, q_res)
-            if in_B is not None:
-                q_res = jnp.where(mask_B, 1.0, q_res)
         return q_res
 
     return committor
@@ -204,6 +206,110 @@ def committor_gradient(committor: Callable, points: jnp.ndarray) -> jnp.ndarray:
 
     grads = jax.vmap(jax.grad(_scalar_q))(points_flat)  # (P, dim)
     return grads.reshape((*original_shape, dim))
+
+
+def committor_dirichlet_energy(
+    result: SlicedCommittorResult,
+    weights: Weights,
+    *,
+    mode: str = "auto",
+) -> float:
+    """Dirichlet energy 𝓓[q̂] = ∫ (∇q̂)ᵀ D ∇q̂ ρ of the recombined committor.
+
+    This is the variational objective the weight solve minimises, expressed in
+    slice space as the quadratic form ``wᵀG w`` (the RD / β=1, D=1 convention).
+    By the variational principle a lower value is closer to the true committor,
+    so it is a label-free *relative* quality ranker for model selection. It
+    needs no diffusion D, no lag, and no trajectory: it is the static
+    ``<D|∇q̄|²>`` object, distinct from the rate-calibrated config-space
+    :func:`~sliced_committor.rates.dirichlet_rate`.
+
+    The energy is the *physical* gradient energy ``wᵀG w`` (the true
+    ``∫(∇q̂)²ρ``), computed consistently with :func:`build_committor`'s combiner
+    so it is the energy of the committor actually built. It deliberately
+    excludes the solver's Tikhonov ridge, so it is comparable across the
+    Gram-family solvers (ebmc / pesb / bmc / full_gram all share the same Gram):
+
+    * EBMC / PESB (centered / smoothstep ansatz): ``wᵀG w``. For EBMC the ansatz
+      is ``c + Σ_j w_j q_j`` against the ``(M, M)`` Gram; for PESB it is
+      ``c + Σ_{j,k} w_{j,k} Ψ_k(q_j)`` against the ``(M·P, M·P)`` Kronecker-lifted
+      augmented Gram, with ``w`` the flattened ``(M·P,)`` weight vector. (The
+      solver's reported ``optimal_dirichlet_energy = 1/M_gap`` is the
+      *regularised* metric ``wᵀ(G+ηI)w`` and differs by the small ridge term.)
+    * full_gram / bmc (normalised array combiner ``(Σ w_j q_j)/Σw``):
+      ``w̃ᵀG w̃`` with the same effective weights ``w̃ = w·valid / Σ(w·valid)``.
+    * diagonal / raw ``(M,)`` array (no Gram returned): the diagonal
+      approximation ``Σ_j w̃_j² D_j^RD`` from ``result.log_dirichlet`` (the
+      diagonal solver's own model; off-diagonal coupling and the per-slice
+      relative normalisation are not captured, so it is only loosely comparable
+      to the Gram-family energies).
+
+    Args:
+        result: the :class:`SlicedCommittorResult` from the fit.
+        weights: the weight array/dict returned by the weight solver.
+        mode: ``"auto"`` (default: Gram form when available, else the diagonal
+            fallback), ``"gram"`` (require a Gram / reported energy; raise if
+            absent), or ``"diagonal"`` (always use the ``log_dirichlet`` form).
+
+    Returns:
+        the Dirichlet energy as a float (0.0 if no valid slice contributes).
+    """
+    if mode not in ("auto", "gram", "diagonal"):
+        raise ValueError(f"mode must be 'auto', 'gram', or 'diagonal'; got {mode!r}.")
+
+    valid = jnp.asarray(result.valid_mask)
+    kind, payload = _resolve_combiner(weights)
+    G = weights["G"] if _energy_basis(weights) == "gram" else None
+
+    # Effective combination weights, matching build_committor exactly. Invalid
+    # slices are masked out so the energy is the gradient energy of the committor
+    # actually built (idempotent for the library solvers, whose w is already
+    # valid-masked; the guard makes the contract hold for hand-built dicts too).
+    if kind == "centered":
+        w = jnp.asarray(payload[0])  # constant bias drops from the gradient
+        w_eff = w * valid.astype(w.dtype)
+    elif kind == "pesb":
+        wbp = jnp.asarray(payload[0])  # (M, P) enriched weights
+        w_eff = (wbp * valid.astype(wbp.dtype)[:, None]).reshape(-1)  # (M*P,)
+    else:  # "array": full_gram / bmc / diagonal -> normalised combiner
+        w = jnp.asarray(payload)
+        w_eff = w * valid.astype(w.dtype)
+        Z = jnp.sum(w_eff)
+        Z_safe = jnp.where(jnp.abs(Z) > 0, Z, 1.0)
+        w_eff = w_eff / Z_safe
+
+    # Physical gradient energy wᵀG w (excludes the solver's Tikhonov ridge).
+    if mode != "diagonal" and G is not None:
+        Gm = jnp.asarray(G)
+        return float(w_eff @ (Gm @ w_eff))
+
+    if mode == "gram":
+        raise ValueError(
+            "mode='gram' requires the weight solver to return a Gram matrix 'G' "
+            "(ebmc/pesb/bmc/full_gram); got a bare weight array. Use mode='auto' "
+            "or 'diagonal'."
+        )
+
+    # Diagonal fallback: Σ_j w̃_j² D_j^RD from per-slice log Dirichlet energy.
+    if kind != "array":
+        raise ValueError(
+            f"the {kind!r} ansatz needs its Gram matrix; the diagonal fallback "
+            "applies only to the array combiner."
+        )
+    if result.log_dirichlet is None:
+        raise ValueError(
+            "diagonal Dirichlet energy needs result.log_dirichlet, which is None. "
+            "Recompute the sliced committor (it is populated by default)."
+        )
+    log_D = jnp.asarray(result.log_dirichlet)
+    # Contribute only finite-energy, non-zero-weight slices. Masked slices carry
+    # log_D = +inf; guarding the product (not just D_j) also avoids the
+    # 0 * exp(huge) -> NaN that a zero-weight slice with an overflowing log_D
+    # would otherwise poison the sum with.
+    contributes = jnp.isfinite(log_D) & (w_eff != 0)
+    safe_log_D = jnp.where(contributes, log_D, 0.0)
+    term = jnp.where(contributes, (w_eff**2) * jnp.exp(safe_log_D), 0.0)
+    return float(jnp.sum(term))
 
 
 def _solve_weights(result, samples, weights, weight_kwargs):
@@ -273,5 +379,6 @@ def fit_committor(
     w = _solve_weights(result, samples, weights, weight_kwargs or {})
     q = build_committor(result, w, **(build_kwargs or {}))
     if return_details:
-        return q, CommittorFit(committor=q, result=result, weights=w)
+        energy = committor_dirichlet_energy(result, w)
+        return q, CommittorFit(committor=q, result=result, weights=w, dirichlet_energy=energy)
     return q

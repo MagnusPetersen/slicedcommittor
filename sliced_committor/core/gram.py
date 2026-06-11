@@ -1,8 +1,8 @@
 """Shared Gram-assembly primitives and diagnostics for the sliced committor.
 
-Both the full-Gram simplex solver (:func:`sliced_committor.weights.full_gram_weights`)
+Both the full-Gram simplex solver (:func:`sliced_committor.full_gram_weights`)
 and the basin-moment-constrained solver
-(:func:`sliced_committor.basin_moment_weights`) share a single derivative
+(:func:`sliced_committor.compute_basin_moment_weights`) share a single derivative
 pipeline, Gram assembler, and post-solve diagnostic block. Functions here
 duck-type ``ctx`` as anything with ``slice_coords``, ``committors_1d``, and
 ``free_energies`` attributes so this module stays import-light (no circular

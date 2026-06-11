@@ -9,13 +9,11 @@ Covers:
   * smoothstep n_values validation (rejects n<1)
 """
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from sliced_committor import (
-    EnrichedBMCRepresentationError,
     build_committor,
     compute_basin_moment_weights,
     compute_enriched_basin_moment_weights,
@@ -83,8 +81,8 @@ def test_ebmc_improves_over_bmc(fit):
     bmc = compute_basin_moment_weights(result, samples)
     ebmc = compute_enriched_basin_moment_weights(result, samples)
     # Galerkin guarantee: optimal Dirichlet energy of EBMC ≤ that of BMC.
-    bmc_dirichlet = 1.0 / max(bmc["M_gap"] if "M_gap" in bmc else float("inf"), 1e-30)
-    ebmc_dirichlet = ebmc["optimal_dirichlet_energy"]
+    1.0 / max(bmc["M_gap"] if "M_gap" in bmc else float("inf"), 1e-30)
+    ebmc["optimal_dirichlet_energy"]
     # The diagnostic in the EBMC dict reports D_BMC / D_EBMC directly.
     assert ebmc["improvement_over_bmc"] >= 1.0 - 1e-9, (
         f"expected D_BMC/D_EBMC >= 1, got {ebmc['improvement_over_bmc']}"

@@ -67,6 +67,35 @@ for j, ok in enumerate(result.valid_mask):
         print(j, why_masked(result, j))
 ```
 
+## Tuning settings with `sweep_committor`
+
+The Dirichlet energy `𝓓[q̂] = ⟨D|∇q̂|²⟩` is a label-free, ground-truth-free
+quality score (lower is closer to the true committor, by the variational
+principle). `fit_committor(..., return_details=True)` reports it per fit, and
+`sweep_committor` fits a Cartesian grid of settings and keeps the best by it:
+
+```python
+import sliced_committor as sc
+
+res = sc.sweep_committor(
+    samples, in_A=in_A, in_B=in_B,
+    grid={"n_directions": [128, 256], "weights": ["ebmc", "full_gram"]},
+    n_bins=200,                       # any fit_committor kwarg held fixed
+)
+print(res.summary())                 # one row per combination; best marked *
+q = res.best_committor               # the winner's callable q(x)
+
+# Or score one fit directly:
+_, fit = sc.fit_committor(samples, in_A=in_A, in_B=in_B, return_details=True)
+print(fit.dirichlet_energy)
+```
+
+The energy is comparable only *within* the Gram-family solvers (`ebmc` / `pesb`
+/ `bmc` / `full_gram`); a sweep that also varies onto the diagonal solver warns
+(rank one family at a time, or pass a custom `select_by=lambda fit: ...`). The
+reported mean boundary error guards against a fit that lowers its energy by
+undershooting the `q=0` / `q=1` boundaries.
+
 ## Computing rates
 
 Every rate function takes the callable committor from `fit_committor` (or

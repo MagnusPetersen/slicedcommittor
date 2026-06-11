@@ -48,9 +48,12 @@ from .core.solver import (
 from .core.committor import (
     CommittorFit,
     build_committor,
+    committor_dirichlet_energy,
     committor_gradient,
     fit_committor,
 )
+
+from .core.sweep import SweepResult, sweep_committor
 
 from .core.weights import (
     compute_epsilon,
@@ -63,12 +66,7 @@ from .core.weights import (
     get_default_weight_functions,
 )
 
-from .core._bmc import basin_moment_weights
-from .core._bmc_enriched import (
-    EnrichedBMCRepresentationError,
-    enriched_basin_moment_weights,
-    enriched_basin_moment_weights_power,
-)
+from .core._bmc_enriched import EnrichedBMCRepresentationError
 
 from .core.directions import (
     DirectionSamplingConfig,
@@ -106,7 +104,11 @@ __all__ = [
     "fit_committor",
     "build_committor",
     "committor_gradient",
+    "committor_dirichlet_energy",
     "CommittorFit",
+    # Settings sweep (fit a grid of configs, keep the best by Dirichlet energy)
+    "sweep_committor",
+    "SweepResult",
     # Solver internals (results + diagnostics)
     "compute_sliced_committor",
     "SlicedCommittorResult",
@@ -121,9 +123,6 @@ __all__ = [
     "compute_full_gram_weights",
     "corrected_dirichlet_inv_rd",
     "full_gram_weights",
-    "basin_moment_weights",
-    "enriched_basin_moment_weights",
-    "enriched_basin_moment_weights_power",
     "EnrichedBMCRepresentationError",
     "compute_weights_multi",
     "get_all_weight_functions",
@@ -166,4 +165,4 @@ __all__ = [
     "PlateauWindow",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

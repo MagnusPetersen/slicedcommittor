@@ -62,7 +62,6 @@ chignolin benchmarks.
 """
 
 import logging
-from typing import Dict, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -75,7 +74,7 @@ from .gram import (
     compute_shared_gram_diagnostics,
 )
 from .solver import _interp_1d_at_samples
-from .weights import _resolve_eta
+from .weights import _mask_and_regularize_gram, _resolve_eta
 
 logger = logging.getLogger(__name__)
 
@@ -98,16 +97,8 @@ class EnrichedBMCRepresentationError(RuntimeError):
 @jax.jit
 def _solve_enriched_bmc_kkt(G, a, b, valid_mask, eta_val):
     """JIT body for the single-constraint closed-form solve with bias."""
-    M = G.shape[0]
     valid = valid_mask.astype(G.dtype)
-
-    mask_2d = valid[:, None] * valid[None, :]
-    G_masked = G * mask_2d + jnp.diag(1.0 - valid)
-
-    G_diag_valid = jnp.where(valid > 0, jnp.diag(G_masked), jnp.inf)
-    med_diag = jnp.median(G_diag_valid)
-    med_diag = jnp.where(jnp.isfinite(med_diag) & (med_diag > 0), med_diag, 1.0)
-    G_reg = G_masked + eta_val * med_diag * jnp.eye(M)
+    G_reg, _med_diag = _mask_and_regularize_gram(G, valid_mask, eta_val)
 
     a_m = a * valid
     b_m = b * valid
