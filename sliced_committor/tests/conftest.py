@@ -34,3 +34,69 @@ def golden_samples(golden_data):
 @pytest.fixture(scope="session")
 def golden_labels(golden_data):
     return jnp.asarray(golden_data["in_A"]), jnp.asarray(golden_data["in_B"])
+
+
+# ---------------------------------------------------------------------------
+# Workflows-subpackage fixtures (synthetic only; mdtraj-gated where needed).
+# ---------------------------------------------------------------------------
+def write_colvar(path, time, columns, fields, periodic=None):
+    """Write a minimal PLUMED COLVAR file. ``columns`` is a dict name->array."""
+    lines = [f"#! FIELDS {' '.join(fields)}"]
+    for name, (lo, hi) in (periodic or {}).items():
+        lines.append(f"#! SET min_{name} {lo}")
+        lines.append(f"#! SET max_{name} {hi}")
+    data = np.column_stack([time] + [columns[f] for f in fields if f != "time"])
+    body = "\n".join(" ".join(f"{v:.6f}" for v in row) for row in data)
+    path.write_text("\n".join(lines) + "\n" + body + "\n")
+    return path
+
+
+@pytest.fixture
+def synthetic_traj():
+    """A tiny 4-residue ALA backbone mdtraj Trajectory factory (for featurization)."""
+    md = pytest.importorskip("mdtraj")
+
+    def _make(n_frames=50, n_res=4, seed=0):
+        top = md.Topology()
+        chain = top.add_chain()
+        for i in range(n_res):
+            res = top.add_residue("ALA", chain, resSeq=i + 1)
+            top.add_atom("N", md.element.nitrogen, res)
+            top.add_atom("CA", md.element.carbon, res)
+            top.add_atom("C", md.element.carbon, res)
+            top.add_atom("O", md.element.oxygen, res)
+        rng = np.random.default_rng(seed)
+        xyz = rng.normal(scale=0.3, size=(n_frames, n_res * 4, 3)).astype(np.float32)
+        traj = md.Trajectory(xyz, top)
+        traj.time = np.arange(n_frames, dtype=float)
+        return traj
+
+    return _make
+
+
+@pytest.fixture
+def synthetic_us_folder(tmp_path, synthetic_traj):
+    """Build a 2-window 1D US folder (COLVAR + plumed.dat + xtc + pdb) and return its path."""
+    pytest.importorskip("mdtraj")
+    root = tmp_path / "US_synthetic"
+    windows = root / "windows"
+    windows.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    centers = [0.2, 0.8]
+    for k, c in enumerate(centers):
+        wdir = windows / f"window_{k:02d}"
+        wdir.mkdir()
+        n = 60
+        q = np.clip(rng.normal(c, 0.08, size=n), 0, 1)
+        t = np.arange(n, dtype=float)
+        write_colvar(
+            wdir / "COLVAR", t, {"q": q, "restr.bias": np.zeros(n)}, ["time", "q", "restr.bias"]
+        )
+        (wdir / "plumed.dat").write_text(
+            f"restr: RESTRAINT ARG=q AT={c} KAPPA=200.0\nPRINT ARG=q FILE=COLVAR STRIDE=1\n"
+        )
+        traj = synthetic_traj(n_frames=n, seed=k)
+        traj.save_xtc(str(wdir / "prod.xtc"))
+        if k == 0:
+            traj[0].save_pdb(str(root / "conf.pdb"))
+    return root

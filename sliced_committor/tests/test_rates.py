@@ -257,6 +257,34 @@ def test_hummer_recovers_constant_D_on_windowed_ou():
     assert float(np.median(prof.values)) == pytest.approx(0.05, rel=0.3)
 
 
+def test_km_per_window_recovers_constant_D_on_windowed_ou():
+    # Per-window Kramers-Moyal: one D per window from the within-window short-lag
+    # drift-corrected variance. On confined OU it recovers the true D, like Hummer.
+    x, wid = _windowed_ou()
+    dummy = lambda p: jnp.zeros(jnp.asarray(p).shape[0])  # noqa: E731 (coordinate= path)
+    prof = sc.diffusion_coefficient(
+        dummy,
+        x[:, None],
+        dt=0.01,
+        coordinate=x,
+        window_ids=wid,
+        method="kramers_moyal",
+        per_window=True,
+        lag=1,
+    )
+    assert prof.values.shape[0] == 6  # one D per window
+    assert float(np.median(prof.values)) == pytest.approx(0.05, rel=0.3)
+
+
+def test_km_per_window_requires_window_ids():
+    x, _ = _windowed_ou(n_win=1, n_per=2000)
+    dummy = lambda p: jnp.zeros(jnp.asarray(p).shape[0])  # noqa: E731
+    with pytest.raises(ValueError, match="requires window_ids"):
+        sc.diffusion_coefficient(
+            dummy, x[:, None], dt=0.01, coordinate=x, method="kramers_moyal", per_window=True
+        )
+
+
 def test_hummer_requires_window_ids():
     x, _ = _windowed_ou(n_win=1, n_per=2000)
     dummy = lambda p: jnp.zeros(jnp.asarray(p).shape[0])  # noqa: E731
@@ -420,3 +448,36 @@ def test_saddle_bridge_unknown_mode_raises(committor_and_trajectory):
     q, s, in_A, in_B, traj = committor_and_trajectory
     with pytest.raises(ValueError, match="unknown mode"):
         sc.saddle_bridge_D(q, s, traj, dt=0.01, mode="bogus", n_bins=50)
+
+
+def test_mapped_committor_diffusion_scales_with_D_s(committor):
+    # D_q(q) = D_s * <|grad q|^2>_q / <|grad s|^2>: linear in D_s, and equal to the
+    # bare co-area gradient profile when D_s = <|grad s|^2> (so D0 = 1).
+    q, s, in_A, in_B = committor
+    prof1 = sc.mapped_committor_diffusion(q, s, D_s=1.0, cv_grad_sq=1.0, n_bins=50)
+    prof2 = sc.mapped_committor_diffusion(q, s, D_s=2.0, cv_grad_sq=1.0, n_bins=50)
+    good = np.isfinite(prof1.values) & np.isfinite(prof2.values)
+    assert good.sum() > 5 and np.all(prof1.values[good] > 0)
+    np.testing.assert_allclose(prof2.values[good], 2.0 * prof1.values[good], rtol=1e-9)
+    # cv_grad_sq divides the scale: D_s=2, g_s=2 -> same as D_s=1, g_s=1.
+    prof3 = sc.mapped_committor_diffusion(q, s, D_s=2.0, cv_grad_sq=2.0, n_bins=50)
+    np.testing.assert_allclose(prof3.values[good], prof1.values[good], rtol=1e-9)
+
+
+def test_committor_rate_accepts_injected_D_profile(committor_and_trajectory):
+    # A precomputed D_q profile (here the CV-mapped one) can be injected into
+    # committor_rate, bypassing the trajectory estimate, and yields a finite rate.
+    q, s, in_A, in_B, traj = committor_and_trajectory
+    Dq = sc.mapped_committor_diffusion(q, s, D_s=0.05, cv_grad_sq=1.0, n_bins=60)
+    out = sc.committor_rate(
+        q, s, traj, dt=0.01, reduction="harmonic", n_bins=60, in_A=in_A, in_B=in_B, D_profile=Dq
+    )
+    assert np.isfinite(out["k_AB"]) and out["k_AB"] > 0
+
+
+def test_mapped_committor_diffusion_rejects_bad_inputs(committor):
+    q, s, in_A, in_B = committor
+    with pytest.raises(ValueError, match="cv_grad_sq"):
+        sc.mapped_committor_diffusion(q, s, D_s=1.0, cv_grad_sq=0.0)
+    with pytest.raises(ValueError, match="D_s"):
+        sc.mapped_committor_diffusion(q, s, D_s=-1.0, cv_grad_sq=1.0)

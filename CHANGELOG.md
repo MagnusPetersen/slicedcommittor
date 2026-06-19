@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`sliced-committor-us --reference NAME=VALUE[:UNITS]`** (repeatable): plot custom
+  reference rate(s) on the comparison chart, e.g. `--reference expt=0.0105:1/us`
+  (UNITS default `1/s`). Overrides the registry rates; when omitted, known systems
+  use their registry reference and an unregistered folder gets no reference band.
+  Threaded through `run_pipeline(references=...)` -> `run_sweep`.
+- **Verbose discovery logging** (`sliced-committor-us -v`): `load_us_dataset` now
+  logs each discovery decision (config-source match, window count, resolved topology
+  + atom selection, and the representative window's COLVAR / CV-columns / restraint
+  center+kappa / trajectory).
+- **LDA is the fast-mode informed direction default** (fast sweep is now
+  `{uniform, lda}` instead of `{uniform, tica_ema_decomposed}`): LDA is supervised
+  (uses the A/B labels) and dynamics-free, so it is cheaper than the TICA modes,
+  which need per-window trajectories. `lda` is also added to the exhaustive mode set.
+- **Comprehensive US-workflow documentation** (`docs/umbrella_sampling.md`): the CLI
+  reference, auto-discovery, the `SystemConfig` registry, the sidecar schema (with
+  `Region` box/ball examples), featurizations, direction modes, the rate estimators,
+  reference rates, and outputs.
+
+### Fixed
+- **`--no-plot` is now honored.** It was wired into argparse but never threaded to
+  `write_report`, so plots were always generated; `run_pipeline` now takes `plot=`.
+- **Clearer sidecar-on-failure message.** When no system config matches an
+  unregistered folder, the error now names the required sidecar keys (region_A /
+  region_B, cv_columns, kappa, beta, topology) and their shapes, and the `--help`
+  epilog documents them.
+- **`sliced-committor-us .` / `./` from inside a US folder now works.** The registry
+  match used `Path(folder).name`, which is empty for `.`/`./`; the folder is now
+  resolved to a canonical path first.
+- **Informed direction modes on a 1D feature** (e.g. `cv_only`) no longer error
+  (`dim must be >= 2`): in 1D there is a single axis up to sign, so `lda`/`pca`/etc.
+  fall back to the trivial uniform single-axis path.
+
+### Changed
+- **Workflows kinetics: replaced the feature-space `TPT_cv` estimator with the
+  coordinate-invariant `TPT_cvmap`.** The old `TPT_cv` (a frozen scalar CV-space
+  diffusion times the FEATURE-space `|grad q|^2`) was not coordinate-invariant: it
+  scales as `1/alpha^2` under a feature rescaling `f -> alpha*f` (the committor and
+  `<|grad q|^2>` transform, the scalar `D_cv` does not). `TPT_cvmap` reads the TPT
+  flux PLATEAU on the CV-mapped committor diffusion
+  `D_q(q) = D_s * <|grad q|^2>_q / <|grad s|^2>` (the same diffusion as
+  `BS_mfpt_cvmap`, with the plateau reduction instead of the harmonic MFPT); the
+  configurational scale `D0 = D_s/<|grad s|^2>` transforms as `alpha^2` and cancels
+  the gradient, so the estimate is feature-scaling invariant. Affects
+  `rates_by_method` keys, the `profiles.png` flux panel, and `report.md`.
+
 ## [0.5.0] - 2026-06-11
 
 ### Added

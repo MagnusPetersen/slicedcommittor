@@ -12,6 +12,7 @@ before state A.
 quickstart
 theory
 recipes
+umbrella_sampling
 reproducibility
 api/index
 changelog

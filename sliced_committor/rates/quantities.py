@@ -182,6 +182,54 @@ def _estimate_D_hummer(levels_t, window_ids, dt, min_count, name):
     )
 
 
+def _estimate_D_km_per_window(levels_t, window_ids, lag, dt, min_count, name):
+    """Per-window drift-corrected Kramers-Moyal diffusion (one D per window).
+
+    Within each window k (frames assumed time-ordered and contiguous) the
+    short-lag displacement variance gives the LOCAL short-time diffusion
+
+        D_k = (<ds^2> - <ds>^2) / (2 lag dt),   ds = level[t+lag] - level[t]
+
+    using only within-window consecutive pairs (no cross-window drift). It is
+    the per-window analogue of the coordinate-binned Kramers-Moyal estimator
+    and the direct short-time counterpart of the Hummer per-window estimator
+    (:func:`_estimate_D_hummer`): one D placed at the window's mean coordinate
+    value, so both estimators yield a (coarse) D(level) profile with one point
+    per window on the same footing. ``lag`` defaults to 1 (the diffusive
+    short-time limit); ``np.var`` subtracts the mean displacement, so the drift
+    induced by the umbrella restraint is removed.
+    """
+    wid = np.asarray(window_ids).reshape(-1)
+    levels_t = np.asarray(levels_t, dtype=np.float64)
+    L = max(int(lag), 1)
+    centers, D_vals, counts = [], [], []
+    for k in np.unique(wid):
+        x = levels_t[wid == k]
+        if x.shape[0] < max(int(min_count), L + 2):
+            continue
+        ds = x[L:] - x[:-L]
+        var = float(np.var(ds))  # drift-corrected: var subtracts <ds>
+        D = var / (2.0 * L * dt)
+        if not np.isfinite(D) or D <= 0.0:
+            continue
+        centers.append(float(np.mean(x)))
+        D_vals.append(D)
+        counts.append(x.shape[0])
+    if not centers:
+        raise RuntimeError(
+            "diffusion_coefficient(per_window=True, method='kramers_moyal'): no "
+            "window had enough samples for a within-window short-lag variance "
+            "(raise min_count or check window_ids)."
+        )
+    order = np.argsort(centers)
+    return Profile(
+        levels=np.asarray(centers)[order],
+        values=np.asarray(D_vals)[order],
+        counts=np.asarray(counts, dtype=np.int64)[order],
+        name=name,
+    )
+
+
 def _barrier_band_median(D_values, counts, centers, span):
     """Count-weighted median of D over the central 60% of the coordinate span."""
     lo = span[0] + 0.2 * (span[1] - span[0])
@@ -221,6 +269,7 @@ def diffusion_coefficient(
     n_bins=200,
     min_count=5,
     method="kramers_moyal",
+    per_window=False,
 ):
     """Position-dependent diffusion D along the committor (or a CV).
 
@@ -236,9 +285,9 @@ def diffusion_coefficient(
             (``method="kramers_moyal"``.)
         window_ids: ``(T,)`` integer per-frame labels. For ``"kramers_moyal"`` ->
             window-stratified KM (umbrella sampling); ``None`` -> single unbiased
-            trajectory. REQUIRED for ``"hummer"``.
+            trajectory. REQUIRED for ``"hummer"`` and for ``per_window=True``.
         n_bins: coordinate resolution (``"kramers_moyal"``). min_count: bins
-            (KM) / windows (Hummer) below this -> dropped.
+            (KM) / windows (Hummer / per-window KM) below this -> dropped.
         method: ``"kramers_moyal"`` (default) -- drift-corrected
             ``Var(dlevel_lag)/(2 lag dt)`` per coordinate bin, lag-selected; or
             ``"hummer"`` -- Kramers/Hummer 2005 ``Var(level)/(tau_int dt)`` per
@@ -247,6 +296,13 @@ def diffusion_coefficient(
             confined within each window and so requires ``window_ids``;
             ``lag*`` are ignored. It returns one D per window placed at the
             window's mean coordinate value.
+        per_window: when True and ``method="kramers_moyal"``, return ONE D per
+            window (within-window short-lag drift-corrected variance, placed at
+            the window's mean coordinate value) instead of a coordinate-binned
+            profile -- the per-window counterpart of ``"hummer"``, so both
+            estimators are on the same per-window footing. Requires
+            ``window_ids``; ``lag`` defaults to 1. No-op for ``"hummer"`` (which
+            is inherently per-window).
 
     Returns:
         :class:`Profile` if ``at is None``, else a float / array.
@@ -269,6 +325,18 @@ def diffusion_coefficient(
         return prof if at is None else value_at(prof, at)
     if method != "kramers_moyal":
         raise ValueError(f"unknown method={method!r}; use 'kramers_moyal' or 'hummer'")
+
+    if per_window:
+        if wid is None:
+            raise ValueError(
+                "diffusion_coefficient(per_window=True) requires window_ids: the "
+                "per-window Kramers-Moyal estimator needs per-frame window labels."
+            )
+        if wid.shape[0] != T:
+            raise ValueError(f"window_ids length {wid.shape[0]} != trajectory length {T}")
+        L = 1 if lag is None else int(lag)
+        prof = _estimate_D_km_per_window(levels_t, wid, L, dt, min_count, name)
+        return prof if at is None else value_at(prof, at)
 
     edges = np.linspace(span[0], span[1], n_bins + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -314,6 +382,7 @@ def _density_and_diffusion(
     lag_candidates=_LAG_CANDIDATES,
     min_count=5,
     diffusion_method="kramers_moyal",
+    per_window=False,
 ):
     """The committor density π(q) (from the ensemble) and diffusion D_q(q) (from
     the trajectory) on the same grid resolution.
@@ -321,7 +390,8 @@ def _density_and_diffusion(
     These are the two profiles every committor-coordinate rate is built from.
     Plain forwarding to :func:`density` / :func:`diffusion_coefficient`, factored
     out so the call sites (``_committor_profiles``, :func:`kramers_rate`,
-    :func:`saddle_bridge_D`) cannot drift apart.
+    :func:`saddle_bridge_D`) cannot drift apart. ``per_window`` forwards to
+    :func:`diffusion_coefficient` (one D per window for ``"kramers_moyal"``).
     """
     pi_prof = density(
         committor,
@@ -343,6 +413,7 @@ def _density_and_diffusion(
         n_bins=n_bins,
         min_count=min_count,
         method=diffusion_method,
+        per_window=per_window,
     )
     return pi_prof, D_prof
 
@@ -486,6 +557,7 @@ def saddle_bridge_D(
     lag_candidates=_LAG_CANDIDATES,
     min_count=5,
     diffusion_method="kramers_moyal",
+    per_window=False,
 ):
     """Calibrated configurational scalar D bridging the two rate families.
 
@@ -525,6 +597,7 @@ def saddle_bridge_D(
         lag_candidates=lag_candidates,
         min_count=min_count,
         diffusion_method=diffusion_method,
+        per_window=per_window,
     )
     # ⟨|∇q̄|²⟩(q) = Φ_{D=1}(q) / π(q): the iso-q-conditional mean squared gradient
     # (the co-area sum divided by the density on the SAME [0,1] grid).
@@ -578,3 +651,79 @@ def saddle_bridge_D(
         return BridgeD(float(D_q_pi_avg / g_pi_avg), D_q_pi_avg, g_pi_avg, float(q_star), mode)
 
     raise ValueError(f"unknown mode={mode!r}; use 'saddle_local' or 'volume_average'")
+
+
+def mapped_committor_diffusion(
+    committor,
+    samples,
+    *,
+    D_s,
+    cv_grad_sq,
+    sample_weights=None,
+    n_bins=200,
+    at=None,
+):
+    """Committor-space diffusion D_q(q) MAPPED from the umbrella-CV diffusion D_s.
+
+    The diffusion coefficient is honestly measurable only along the umbrella CV
+    ``s`` (the Hummer in-window estimator gives ``D_s``); a direct committor-space
+    measurement would need path-space reweighting at the unstable barrier. But both
+    scalar diffusivities are the SAME Cartesian diffusion tensor contracted along
+    two different gradients. Under the one-parameter shape assumption ``D = D0 M0``
+    with ``M0 = I`` (isotropic in the slicing/feature space -- the recommended
+    default), both reduce to the single configurational scale ``D0`` seen through a
+    gradient,
+
+        D_s = D0 <|grad s|^2>,    D_q(q) = D0 <|grad q|^2>_q ,
+
+    so eliminating ``D0`` gives the bias-free MAP onto the committor coordinate
+
+        D_q(q) = D_s * <|grad q|^2>_q / <|grad s|^2> .
+
+    The committor mean-squared-gradient profile ``<|grad q|^2>_q = Phi_{D=1}(q)/pi(q)``
+    is the co-area identity (no length-scale, and for the sliced ansatz no autodiff
+    through a learned committor). Only the single scalar ``D0 = D_s/<|grad s|^2>``
+    carries physical-time content; it is the lone dynamical input, taken from the
+    clean CV measurement rather than estimated on the barrier. See
+    Petersen/Lichtinger/Covino 2026, "Rates in committor space: mapping the
+    diffusion coefficient from the umbrella CV".
+
+    Args:
+        committor: callable ``q(x)``.
+        samples: ``(N, dim)`` static ensemble (for the co-area gradient + pi).
+        D_s: the configurational-scale diffusion measured along the umbrella CV
+            (e.g. the barrier-band Hummer value), in (CV-units)^2 / time.
+        cv_grad_sq: the CV's mean squared gradient ``<|grad s|^2>`` (M0=I) in the
+            SAME (slicing/feature) space as the committor gradient -- a scalar. The
+            single scalar ``D0 = D_s / cv_grad_sq`` sets the whole physical scale.
+        sample_weights: ``(N,)`` optional MBAR/WHAM weights.
+        n_bins: committor-coordinate resolution of the returned profile.
+        at: ``None`` -> the full :class:`Profile` of D_q(q); else value(s) at the
+            requested committor level(s) / range.
+
+    Returns:
+        :class:`Profile` of D_q(q) if ``at is None``, else a float / array.
+    """
+    g_s = float(cv_grad_sq)
+    if not (np.isfinite(g_s) and g_s > 0):
+        raise ValueError(f"cv_grad_sq must be finite and positive; got {cv_grad_sq!r}")
+    if not (np.isfinite(float(D_s)) and float(D_s) > 0):
+        raise ValueError(f"D_s must be finite and positive; got {D_s!r}")
+    pi_prof = density(committor, samples, sample_weights=sample_weights, n_bins=n_bins)
+    Phi1 = reactive_flux(
+        committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins
+    )
+    pi = np.asarray(pi_prof.values, dtype=np.float64)
+    # <|grad q|^2>(q) = Phi_{D=1}(q) / pi(q) (co-area identity).
+    g_of_q = np.where(
+        pi > 0, np.asarray(Phi1.values, dtype=np.float64) / np.where(pi > 0, pi, 1.0), np.nan
+    )
+    D0 = float(D_s) / g_s  # the single configurational scale from the CV
+    Dq = D0 * g_of_q
+    prof = Profile(
+        levels=np.asarray(pi_prof.levels, dtype=np.float64),
+        values=Dq,
+        counts=pi_prof.counts,
+        name="committor",
+    )
+    return prof if at is None else value_at(prof, at)

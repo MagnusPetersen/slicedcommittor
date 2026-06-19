@@ -30,6 +30,7 @@ from .quantities import (
     BridgeD,
     density,
     diffusion_coefficient,
+    mapped_committor_diffusion,
     reactive_flux,
     saddle_bridge_D,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "diffusion_coefficient",
     "reactive_flux",
     "saddle_bridge_D",
+    "mapped_committor_diffusion",
     "BridgeD",
     # Rates
     "dirichlet_rate",

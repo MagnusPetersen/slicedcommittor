@@ -38,6 +38,9 @@ classifiers = [
 ]
 dependencies = ["jax>=0.4.20", "numpy>=1.24"]
 
+[project.scripts]
+sliced-committor-us = "sliced_committor.workflows.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/MagnusPetersen/slicedcommittor"
 Repository = "https://github.com/MagnusPetersen/slicedcommittor"
@@ -55,7 +58,15 @@ docs = [
 ]
 lint = ["ruff>=0.5", "pre-commit>=3.5"]
 examples = ["matplotlib>=3.7", "jupyter>=1.0"]
-dev = ["sliced-committor[test,docs,lint,examples]"]
+# Umbrella-sampling workflows: trajectory I/O, MBAR, plotting, sidecar configs.
+workflows = [
+    "mdtraj>=1.9",
+    "pymbar>=4.0",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+    "pyyaml>=6",
+]
+dev = ["sliced-committor[test,docs,lint,examples,workflows]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["sliced_committor"]
