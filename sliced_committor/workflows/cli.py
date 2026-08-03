@@ -90,6 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--traj-stride", type=int, default=1, help="trajectory read stride (US folders)")
     p.add_argument("--max-frames", type=int, default=None, help="cap total frames after loading")
+    p.add_argument(
+        "--window-fraction",
+        type=float,
+        default=None,
+        metavar="F",
+        help="keep only the first fraction F (0<F<1) of each window's frames before "
+        "reweighting, emulating a shorter simulation (e.g. 0.1 = first 10%% of every "
+        "window). Distinct from --traj-stride/--max-frames (uniform thinning); use it "
+        "to probe how the rate estimators degrade with less sampling per window.",
+    )
     p.add_argument("--seed", type=int, default=0, help="RNG seed")
     p.add_argument("--no-plot", action="store_true", help="skip the comparison plot")
     p.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
@@ -118,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         reweight_method=args.reweight,
         traj_stride=args.traj_stride,
         max_frames=args.max_frames,
+        window_fraction=args.window_fraction,
         references=references,
         seed=args.seed,
         plot=not args.no_plot,

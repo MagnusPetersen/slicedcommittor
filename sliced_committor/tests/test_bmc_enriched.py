@@ -90,13 +90,20 @@ def test_ebmc_improves_over_bmc(fit):
 
 
 def test_pesb_p1_matches_ebmc(fit):
-    """At P=1 with n_values=[1.0], PESB reproduces basic EBMC bit-for-bit."""
+    """At P=1 with n_values=[1.0], PESB reproduces basic EBMC bit-for-bit.
+
+    The ridge is pinned on both sides deliberately.  The identity is between the
+    two *solves* at a common regularisation, so it says nothing unless both use
+    the same one; leaving it to the defaults would make this test silently depend
+    on the two entry points continuing to agree about what that default is.
+    """
     samples, _, _, result = fit
-    ebmc = compute_enriched_basin_moment_weights(result, samples)
+    ebmc = compute_enriched_basin_moment_weights(result, samples, tikhonov="auto")
     pesb = compute_enriched_basin_moment_weights_power(
         result,
         samples,
         P=1,
+        tikhonov="auto",
     )
     np.testing.assert_allclose(np.asarray(pesb["w"]), np.asarray(ebmc["w"]), rtol=1e-10, atol=1e-12)
     assert abs(pesb["c"] - ebmc["c"]) < 1e-10

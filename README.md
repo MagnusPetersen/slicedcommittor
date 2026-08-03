@@ -22,7 +22,7 @@ and training schedule.
 This library implements the **sliced committor** introduced in
 
 > Petersen, M., Lichtinger, S. and Covino, R.
-> *Committors and reaction rates from random one-dimensional projections*
+> *Committors and Reaction Rates from Trial Functions That Violate the Boundary Conditions*
 > (2026, manuscript submitted).
 
 The method writes the committor as a weighted sum of one-dimensional
@@ -365,7 +365,7 @@ re-projects on demand.
 If you use `slicedcommittor` in published work, please cite the paper:
 
 > Petersen, M., Lichtinger, S. and Covino, R.
-> *Committors and reaction rates from random one-dimensional projections*
+> *Committors and Reaction Rates from Trial Functions That Violate the Boundary Conditions*
 > (2026, manuscript submitted).
 
 A machine-readable [`CITATION.cff`](CITATION.cff) sits at the repo root. GitHub
@@ -376,7 +376,7 @@ BibTeX:
 
 ```bibtex
 @article{petersen2026sliced,
-  title   = {Committors and reaction rates from random one-dimensional projections},
+  title   = {Committors and Reaction Rates from Trial Functions That Violate the Boundary Conditions},
   author  = {Petersen, Magnus and Lichtinger, Simon and Covino, Roberto},
   year    = {2026},
   note    = {Manuscript submitted; journal and DOI to be filled in on acceptance.},

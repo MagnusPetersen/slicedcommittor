@@ -34,6 +34,7 @@ from .solver import (
     compute_enriched_basin_moment_weights,
     compute_enriched_basin_moment_weights_power,
     compute_full_gram_weights,
+    compute_nitsche_weights,
     compute_sliced_committor,
     compute_weights_multi,
 )
@@ -67,6 +68,7 @@ _WEIGHT_SOLVERS = {
     "pesb": compute_enriched_basin_moment_weights_power,
     "bmc": compute_basin_moment_weights,
     "full_gram": compute_full_gram_weights,
+    "nitsche": compute_nitsche_weights,
 }
 _DIAGONAL_ALIASES = {"diagonal", "corrected_dirichlet_inv_rd", "rd"}
 
@@ -332,6 +334,96 @@ def _solve_weights(result, samples, weights, weight_kwargs):
     return weights  # precomputed array or dict
 
 
+def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs,
+                    weights, weight_kwargs):
+    """Absolute ridge from K-fold CV with the BASIS REBUILT on each training set.
+
+    For each fold: fit a fresh sliced committor on the training samples, assemble
+    ``(G, a, b)`` on train and on the held-out fold with that basis, and score the
+    held-out cap ``w'G_te w / ((b_te - a_te)'w)^2`` along an absolute-ridge grid.
+    The selection is the bare argmin of the mean held-out cap, the same rule
+    ``tikhonov='cv'`` uses.
+
+    See ``docs/ridge_rule.md`` Sec. 7 for the measurement that motivates it, and
+    Sec. 7b for why neither rule applies a 1-SE tie-break.
+    """
+    import numpy as np
+
+    from ._ridge_cv import (
+        DEFAULT_N_FOLDS, DEFAULT_N_RIDGE, RIDGE_HI, RIDGE_LO, make_folds,
+    )
+    from ._bmc import compute_basin_moments
+    from .gram import _assemble_gram_matrix, _compute_derivative_matrix
+    from .solver import make_weighting_context
+
+    X = np.asarray(samples)
+    N = X.shape[0]
+    inA, inB = np.asarray(in_A, bool), np.asarray(in_B, bool)
+    strata = np.where(inA, 0, np.where(inB, 1, 2))
+    fold_of = make_folds(N, DEFAULT_N_FOLDS, contiguous=True, strata=strata)
+
+    def assemble(res, idx):
+        """(G, a, b) for the basis in ``res``, evaluated at ``samples[idx]``."""
+        ctx = make_weighting_context(res)
+        proj = ctx.directions @ jnp.asarray(X[idx]).T
+        sub = ctx._replace(projected_samples=proj,
+                           in_A=jnp.asarray(inA[idx]), in_B=jnp.asarray(inB[idx]),
+                           sample_weights=None)
+        F = _compute_derivative_matrix(sub, proj)
+        cos = (ctx.cos_matrix if ctx.cos_matrix is not None
+               else ctx.directions @ ctx.directions.T)
+        G = _assemble_gram_matrix(F.astype(jnp.float64),
+                                  jnp.full(len(idx), 1.0 / len(idx)), cos)
+        a, b = compute_basin_moments(sub)
+        return np.asarray(G, np.float64), np.asarray(a), np.asarray(b)
+
+    caps = None
+    grid = None
+    for k in range(DEFAULT_N_FOLDS):
+        te = np.flatnonzero(fold_of == k)
+        tr = np.flatnonzero(fold_of != k)
+        res_k = compute_sliced_committor(
+            jnp.asarray(X[tr]), in_A=jnp.asarray(inA[tr]), in_B=jnp.asarray(inB[tr]),
+            n_directions=n_directions, seed=seed, **solver_kwargs)
+        Gtr, atr, btr = assemble(res_k, tr)
+        Gte, ate, bte = assemble(res_k, te)
+        keep = np.asarray(res_k.valid_mask, bool)
+        idx = np.flatnonzero(keep)
+        if grid is None:
+            anchor = len(idx) * float(np.mean(np.diag(Gtr[np.ix_(idx, idx)])))
+            grid = np.geomspace(RIDGE_LO * anchor, RIDGE_HI * anchor, DEFAULT_N_RIDGE)
+            caps = np.full((DEFAULT_N_FOLDS, DEFAULT_N_RIDGE), np.nan)
+        Gs = Gtr[np.ix_(idx, idx)]
+        L, V = np.linalg.eigh(0.5 * (Gs + Gs.T))
+        L = np.maximum(L, 0.0)
+        dv = V.T @ (btr[idx] - atr[idx])
+        Gte_s, dte = Gte[np.ix_(idx, idx)], (bte - ate)[idx]
+        for i, r in enumerate(grid):
+            s = float(dv @ (dv / (L + r)))
+            if not np.isfinite(s) or s <= 0:
+                continue
+            w = (V @ (dv / (L + r))) / s
+            gap = float(dte @ w)
+            if abs(gap) > 1e-30:
+                caps[k, i] = float(w @ Gte_s @ w) / gap ** 2
+        del res_k, Gtr, Gte
+
+    with np.errstate(invalid="ignore"):
+        mean = np.nanmean(caps, axis=0)
+    if not np.isfinite(mean).any():
+        raise ValueError("cv_refit: the held-out cap is undefined at every ridge.")
+    scored = np.where(np.isfinite(mean), mean, np.inf)
+    # Bare argmin, matching ``select_ridge_cv``'s ``one_se=False`` default.  This
+    # used to apply the paired 1-SE tie-break; it must not.  The tie-break looked
+    # free because it equalled the argmin on all 22 benchmark configurations, but
+    # a flat cap curve admits an arbitrarily large "free" move: on the paper's 2D
+    # schematic (M=256, n_min=1, equal_width) the curve is flat to 0.88% over a
+    # band where the density-masked grid RMSE moves 15%, and the tie-break walked
+    # three grid points for +15.1%.  ``cv_refit`` is the remedy aimed at exactly
+    # those under-resolved histograms, so it is the last place that walk belongs.
+    return float(grid[int(np.argmin(scored))])
+
+
 def fit_committor(
     samples: jnp.ndarray,
     *,
@@ -376,7 +468,21 @@ def fit_committor(
     result = compute_sliced_committor(
         samples, in_A=in_A, in_B=in_B, n_directions=n_directions, seed=seed, **solver_kwargs
     )
-    w = _solve_weights(result, samples, weights, weight_kwargs or {})
+    weight_kwargs = dict(weight_kwargs or {})
+    if weight_kwargs.get("tikhonov") == "cv_refit":
+        # cv_refit has to live here, not in the weight solver: it rebuilds the
+        # 1D slice BASIS on each training fold, and the solver only ever sees an
+        # already-fitted basis.  That is the whole point -- 'cv' shares one basis
+        # across folds and is therefore blind to binning noise, which is what
+        # makes it under-shrink when the histograms are under-resolved (2D,
+        # n_min=1: 1.6-1.9x the oracle, against 1.00-1.03x for cv_refit).
+        # Costs K basis builds; the assembly stays ~1x because folds partition.
+        weight_kwargs["tikhonov"] = (
+            "ridge_abs",
+            _cv_refit_ridge(samples, in_A, in_B, n_directions, seed,
+                            solver_kwargs, weights, weight_kwargs),
+        )
+    w = _solve_weights(result, samples, weights, weight_kwargs)
     q = build_committor(result, w, **(build_kwargs or {}))
     if return_details:
         energy = committor_dirichlet_energy(result, w)

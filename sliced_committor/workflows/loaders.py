@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,11 @@ logger = logging.getLogger(__name__)
 # Regenerated analytic-toy umbrella data (fine save interval, diffusion-capable).
 # Produced by US_data/toy_us/generate_toy_us.py; lives with the data, not in the
 # package. Each system dir holds us_traj.npz + the reference rate JSONs.
-TOY_DATA_ROOT = Path("/home/covino-shared/data/lichtinger/sliced_committor_clean_v1/US_data/toy_us")
+#
+# Point SLICED_COMMITTOR_TOY_DATA at that directory to use the toy loaders. This
+# was an absolute path into the authors' shared filesystem, which is useless to
+# anyone else and is not ours to advertise; the data is not distributed.
+TOY_DATA_ROOT = Path(os.environ.get("SLICED_COMMITTOR_TOY_DATA", ""))
 _TRAJ_EXTS = (".xtc", ".trr", ".dcd", ".h5", ".nc", ".dtr")
 _COLVAR_NAMES = ("COLVAR", "colvar.dat", "COLVAR.dat", "colvar")
 
@@ -79,6 +84,11 @@ def load_toy_dataset(
     """
     cfg = get_config(name)
     root = Path(data_root) if data_root is not None else TOY_DATA_ROOT
+    if str(root) in ("", "."):
+        raise RuntimeError(
+            "The analytic-toy umbrella data is not bundled. Set "
+            "SLICED_COMMITTOR_TOY_DATA to its root directory, or pass data_root=."
+        )
     data_dir = root / cfg.name
     npz = np.load(data_dir / "us_traj.npz")
     samples = np.asarray(npz["samples"], dtype=float)  # (K, n_per, 2), time-ordered
@@ -228,6 +238,7 @@ def load_us_dataset(
     atom_selection: str = "protein",
     traj_stride: int = 1,
     max_frames: int | None = None,
+    window_fraction: float | None = None,
     seed: int = 0,
 ) -> USDataset:
     """Discover and load a real umbrella-sampling folder into a :class:`USDataset`.
@@ -241,6 +252,15 @@ def load_us_dataset(
             to keep memory bounded; CVs come from COLVAR regardless.
         traj_stride: read every ``traj_stride``-th trajectory frame.
         max_frames: cap total frames (stratified per window) after loading.
+        window_fraction: if given (``0 < f < 1``), keep only the FIRST fraction
+            ``f`` of each window's time-ordered frames (contiguous from t=0),
+            BEFORE reweighting -- i.e. emulate a shorter simulation of every
+            window (e.g. ``0.1`` = the first 10% of each run). Distinct from
+            ``traj_stride`` / ``max_frames``, which thin uniformly over the FULL
+            time span (fewer frames, same wall-clock coverage); truncation
+            instead shortens the wall-clock coverage. ``None`` or ``f >= 1``
+            keeps every frame. Use it to probe how the rate estimators degrade
+            with less sampling.
         seed: subsampling seed.
 
     Returns:
@@ -379,6 +399,26 @@ def load_us_dataset(
                     traj_stride,
                     len(ci),
                 )
+
+        # Emulate a shorter simulation: keep only the FIRST `window_fraction` of
+        # this window's time-ordered frames (contiguous from t=0), BEFORE any
+        # reweighting. `ci` (kept COLVAR indices) and `sub` (aligned subtraj) are
+        # equal-length and time-ordered, so a head slice of both shortens the run
+        # while preserving the frame spacing the diffusion estimator assumes.
+        if window_fraction is not None and 0.0 < window_fraction < 1.0:
+            n_keep = max(2, int(round(window_fraction * ci.size)))
+            if n_keep < ci.size:
+                if wid == 0:
+                    logger.info(
+                        "window truncation: window_fraction=%.4g -> first %d/%d frames "
+                        "per window (emulating a shorter simulation)",
+                        window_fraction,
+                        n_keep,
+                        ci.size,
+                    )
+                ci = ci[:n_keep]
+                if sub is not None:
+                    sub = sub[:n_keep]
 
         cvs_parts.append(cv_full[ci])
         wid_parts.append(np.full(ci.size, wid))

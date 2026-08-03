@@ -30,6 +30,7 @@ def run_pipeline(
     reweight_method: str = "auto",
     traj_stride: int = 1,
     max_frames: int | None = None,
+    window_fraction: float | None = None,
     diffusion_mode: str = "bins_hummer",
     n_diff_bins: int = 25,
     committor_sweep_grid: dict | str | None = "auto",
@@ -51,6 +52,9 @@ def run_pipeline(
         reweight_method: ``"auto"`` | ``"mbar"`` | ``"wham"``.
         traj_stride: trajectory read stride (US folders).
         max_frames: frame cap after loading (US folders).
+        window_fraction: keep only the first fraction ``f`` (``0<f<1``) of each
+            window's frames before reweighting (US folders), emulating a shorter
+            simulation; ``None`` keeps every frame. See :func:`load_us_dataset`.
         diffusion_mode: ``"bins_hummer"`` (default, per-window Hummer on an
             ``n_diff_bins`` committor-bin rate grid), ``"bins"`` (per-bin
             Kramers-Moyal), or ``"per_window"`` (Hummer on a fine grid).
@@ -80,6 +84,7 @@ def run_pipeline(
             sidecar=sidecar,
             traj_stride=traj_stride,
             max_frames=max_frames,
+            window_fraction=window_fraction,
             seed=seed,
         )
         system_name = dataset.system_name

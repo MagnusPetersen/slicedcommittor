@@ -383,6 +383,7 @@ def fit_and_rate(
     diffusion_mode: str = "bins_hummer",
     n_diff_bins: int = 25,
     solver_kwargs: dict | None = None,
+    weight_kwargs: dict | None = None,
     committor_sweep_grid: dict | str | None = "auto",
     committor_select_by: str = "dirichlet",
     scatter_n: int = 4000,
@@ -401,6 +402,7 @@ def fit_and_rate(
         BS local flux at q*=0.5 (q-space D, no q-integration) -- ``BS_local``
         Szabo MFPT (CV-mapped q-space D)        -- ``BS_mfpt_cvmap``
         TPT flux plateau (CV-mapped q-space D)  -- ``TPT_cvmap``
+        BS local flux at q*=0.5 (CV-mapped D, no q-integration) -- ``BS_local_cvmap``
 
     (the committor-free Kramers rate, PMF + CV-space D, is added once per system
     by :func:`sweep.run_sweep`). The committor itself is auto-tuned per feature
@@ -413,6 +415,8 @@ def fit_and_rate(
         features: ``(N, d)`` features, row-aligned with ``dataset`` frames.
         sample_weights: ``(N,)`` MBAR/WHAM weights.
         direction_mode: see :data:`DIRECTION_MODES`.
+        weight_kwargs: forwarded to the weight solver, e.g.
+            ``{"tikhonov": "cv"}`` for the calibration-free ridge.
         weight_solver: committor weight solver used when auto-tuning is disabled
             (``committor_sweep_grid`` falsy); ``"ebmc"`` default.
         n_directions: number of projection directions.
@@ -485,6 +489,10 @@ def fit_and_rate(
         base_solver.update(solver_kwargs)
     solver_kwargs = base_solver
     fit_kwargs: dict[str, Any] = {"weights": weight_solver, "seed": seed}
+    if weight_kwargs:
+        # Reaches the weight solver, not compute_sliced_committor -- this is how
+        # `tikhonov='cv'` (docs/ridge_rule.md) is selected for a rate run.
+        fit_kwargs["weight_kwargs"] = dict(weight_kwargs)
     if directions is None:
         fit_kwargs["n_directions"] = n_directions
     elif hasattr(directions, "mode"):  # DirectionSamplingConfig
@@ -547,6 +555,9 @@ def fit_and_rate(
     n = qv.shape[0]
     idx = np.linspace(0, n - 1, min(scatter_n, n)).astype(int)
     out["scatter"] = {"cv": cvp[idx].tolist(), "q": qv[idx].tolist()}
+    # Full per-sample committor (for downstream display, e.g. colouring a TICA
+    # scatter). Kept as an array (not JSON-serialised) on the returned dict.
+    out["q_samples"] = np.asarray(qv, dtype=float)
 
     if not has_dynamics:
         return out  # no trajectory -> no diffusion-based estimators
@@ -720,6 +731,29 @@ def fit_and_rate(
             )
         except Exception as exc:
             logger.warning("CV-mapped TPT plateau failed: %s", exc)
+        # The Berezhkovskii-Szabo LOCAL flux read at the single q*=0.5 iso-committor
+        # surface, on the CV-mapped diffusion (D_q at q~0.5 only; no q-integration).
+        # This is the "diffusion that maps to around q=0.5" reading: unlike the
+        # harmonic MFPT it is NOT exposed to the poorly-sampled q~0,1 basins/tails,
+        # where the committor ansatz is least accurate.
+        try:
+            estimators["BS_local_cvmap"] = _clean(
+                committor_rate(
+                    q,
+                    feats,
+                    feats,
+                    dt=dt,
+                    reduction="local",
+                    at=0.5,
+                    sample_weights=sw,
+                    in_A=in_A,
+                    in_B=in_B,
+                    n_bins=rate_nbins,
+                    D_profile=mapped_Dq,
+                )
+            )
+        except Exception as exc:
+            logger.warning("CV-mapped BS local (q*=0.5) failed: %s", exc)
     # NOTE: the Kramers rate (PMF along the CV + CV-space diffusion) is
     # committor-independent and added ONCE per system as the PMF-Kramers baseline
     # in sweep.run_sweep / pmf_kramers.
