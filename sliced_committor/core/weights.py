@@ -12,7 +12,7 @@ The general optimal weight has the form
 
 where D_j is the 1D Dirichlet energy of the slice committor used in
 reconstruction and eps_j is the flux-weighted boundary error.  This
-follows from the Generalised Fundamental Identity (GFI), which holds
+follows from the Flux–Fidelity Identity (FFI), which holds
 for *any* choice of 1D committor q_theta(s).
 
 Self-consistency principle
@@ -584,20 +584,211 @@ def _assemble_overlap_matrix(Q, W):
     return Q_scaled @ Q_scaled.T  # (M, M)
 
 
-def _resolve_eta(eta, M, valid_mask, sample_weights=None, N=None):
+def _effective_n(sample_weights, N):
+    """``N_eff = (sum w)^2 / sum w^2``, or ``N`` for uniform weights; None if neither."""
+    if sample_weights is not None:
+        W = jnp.asarray(sample_weights)
+        Z, Z2 = jnp.sum(W), jnp.sum(W**2)
+        if float(Z2) > 0:
+            return float(Z**2 / Z2)
+    if N is not None:
+        return float(N)
+    return None
+
+
+def _resolve_eta(eta, M, valid_mask, sample_weights=None, N=None, G=None):
     """Resolve the Tikhonov parameter.
 
-    Accepts a float (used verbatim) or the string ``'auto'`` (default).  In
-    ``'auto'`` mode, η is scaled to the estimated effective sample size:
+    Accepts a float (used verbatim) or one of two strings.
+
+    ``'auto'`` (default) scales η to the estimated effective sample size only:
 
         η = max(1e-12, 1 / √N_eff)
 
     with ``N_eff = (Σw)² / Σw²`` for non-uniform weights and ``N_eff = N`` for
     uniform weights.  This matches the Full_Solve recommendation δ ~ 1/√N_eff
     and suppresses regularisation bias in well-conditioned, high-N regimes.
+
+    ``'auto_lambda'`` is the recommended setting:
+
+        ridge = 1.8e-4 * (1e5 / N_eff) * M_valid * geomean(diag G_valid)
+
+    ``('lambda', lam)`` is the same rule with the constant exposed.  Both fall
+    back to ``η = lam * M_valid`` when ``G`` is not supplied.
+
+    The ``1/N_eff`` factor is as load-bearing as the ``M`` factor and for the same
+    reason: without it the rule is only correct at the N it was calibrated on.
+    Anchoring on ``M * geomean(diag G)`` alone, best single constant, worst ratio
+    to each configuration's own oracle ridge on the 2D benchmark:
+
+        exponent p in (1e5/N_eff)^p:   0     0.5    1.0    1.3
+        worst over N = 25k..400k:    1.632  1.208  1.045  1.027
+        at N = 25 000 alone:         1.632  1.139  1.045  1.027
+        at N = 400 000 alone:        1.501  1.208  1.023  1.004
+
+    And the M-degradation itself comes back without it: at N = 25 000 the N-blind
+    rule loses 1.41x over M = 64..512 (4.16e-4 -> 5.87e-4), against 1.04x at
+    N = 1e5.  ``mean(diag G)`` is itself N-independent to 1.1x across that range,
+    so this is a genuinely separate degree of freedom, not double-counting.
+    ``p = 1`` is used because it is the round, Wishart-flavoured choice and
+    ``p = 1.3`` (the least-squares fit to three N values on one system) buys only
+    1.7% more.
+
+    Be clear about which parts of this are derived and which are fitted.
+
+    * ``ridge ∝ M`` is DERIVED, exactly, with no constant: replace the M
+      directions by k copies of each and the trial space is unchanged, so the fit
+      must be unchanged, and the restoring ridge is exactly ``k*eta`` (measured
+      1.000, 1.957, 4.019, 7.867 for k = 1, 2, 4, 8).
+    * The anchor must be EXTENSIVE in M -- forced by the same argument -- and must
+      be a DIAGONAL statistic rather than a spectral one, because in high
+      dimension ``G`` is numerically diagonal and ``lambda_max(G)`` is constant in
+      M (on AIB9 it is 251655 to six figures across M = 128..2048), so a
+      ``lambda_max`` anchor would be M-independent and provably wrong.
+    * WHICH diagonal statistic is NOT derived.  Duplication cannot separate
+      ``geomean``, ``mean`` (= tr(G)/M) or any other, since all are extensive.
+      ``geomean`` is an empirical choice: worst ratio 1.054 against 1.079 for
+      ``M*median`` and 1.086 for ``tr(G)``.
+    * The constant ``1.8e-4`` is a MAGIC NUMBER.  It was fitted by minimising the
+      worst-case ratio to each configuration's own ORACLE ridge over 21
+      configurations -- 2D Wolfe-Quapp (d=2, exact PDE oracle), AIB9 (d=52, three
+      direction seeds) and villin (d=350), M = 64..2048, two error metrics.  The
+      per-system optima span 8x (2D 2.7e-4, AIB9 4.6e-5, villin 3.5e-5); the
+      compromise survives that only because the objective is flat.
+
+    Measured, against each configuration's own oracle ridge:
+
+        eta = 'auto' (the M-blind default)   median 1.072x   worst 4.793x
+        'auto_lambda'                        median 1.008x   worst 1.054x
+        held-out-energy selection            median 1.034x   worst 1.209x
+
+    Refitting the constant with each configuration held out gives worst 1.074x,
+    so it is not merely fitting its own test set.  Sensitivity to the constant,
+    worst case over the same 21 configurations: 2x off costs <=1.18, 3x off <=1.27,
+    10x off 1.7-2.7, 100x off 4-19.  So a factor of a few is cheap and an order of
+    magnitude is not.  ``lam`` is dimensionless but NOT universal, and it does not
+    transfer across N (roughly ``N^-1.3`` on 2D over N = 25k..400k); it is
+    calibrated only over N = 1e5..2.7e5.  Outside that, re-derive it with the
+    held-out cap selector (``experiments/ridge_stopping_rule.py``), which needs no
+    oracle and no constant at all, and costs about 1.3x instead of 1.05x.
+
+    Why a diagonal anchor at all.  The solve is ``w = G_reg⁻¹d / (dᵀG_reg⁻¹d)`` with
+    ``G_reg = G + η·median(diag G)·I``, which is *exactly invariant* under
+    ``G -> αG`` because the anchor co-scales.  So rescaling the operator -- the
+    usual "K/n -> Mercer operator" move -- is a provable no-op here, and cannot be
+    the thing that is mis-normalised.  What is mis-normalised is the norm placed
+    on the coefficient vector: ``G`` is a *sum* over directions (only the sample
+    index is averaged, via ``W``), so ``tr(G) ∝ M`` exactly, while the anchor
+    ``median(diag G)`` does not move with M at all.  A fixed ``eta`` is therefore
+    a vanishing relative penalty.
+
+    The exponent is exactly 1, and it is measurable without any theory or any
+    reference solution: replace the M directions by k copies of each.  The trial
+    space is unchanged, so the fitted function must be unchanged, and the ridge
+    that restores it is ``k*eta`` (measured 1.000, 1.957, 4.019, 7.867 for
+    k = 1, 2, 4, 8 -- ``experiments/msweep_2d_normalization.py``).  ``tr(G)``
+    scales by exactly k under that duplication while ``median(diag G)`` does not
+    move, which is the mis-normalisation in two numbers.
+
+    Why ``geomean(diag G)`` and not ``median(diag G)`` or ``tr(G)/M``.  Duplication
+    fixes only that the anchor must be *extensive*; every extensive candidate
+    (``tr(G)``, ``M``, ``||G||_F``, ``lambda_max``, top-k eigenvalue sums) scales by
+    k under it, so it cannot choose between them.  The choice is empirical, and
+    the discriminator is how well one constant transfers.  The median is a
+    knife-edge order statistic: under the LDA sampler the draw has two strata
+    whose per-direction Dirichlet energies differ by orders of magnitude, and the
+    pooled median sits in the gap between the modes.  ``tr(G)`` is a sample mean
+    of a heavy-tailed variable (the top 1% of directions carry 11-39% of it).  The
+    geometric mean is neither.  Worst ratio to the per-configuration oracle with a
+    single constant, over the same 21 configurations:
+
+        M * geomean(diag)   1.054      (leave-one-out 1.074)
+        M * median(diag)    1.079      (1.101)
+        tr(G) = M * mean    1.086      (1.101)
+        M alone             1.127      (1.209)
+        median(diag)        1.481      (2.720)   <- the shipped M-blind shape
+
+    Only the last is qualitatively wrong; the rest differ by little, and the
+    honest summary is that the anchor must be extensive and ``M*geomean`` is the
+    best of the family rather than uniquely correct.
+
+    ``'auto_m'`` is ``η = M_valid / N_eff``: right M-dependence, median anchor,
+    system-specific constant (the measured optimum is ~40x it on 2D and ~8x on
+    AIB9).  Prefer ``'auto_lambda'``.
+
+    Caveats worth knowing before trusting any of this on a new system.  The ridge
+    matters enormously on 2D (it moves the error 79-475x) and hardly at all on
+    villin (1.02x across seven decades), so a rule can look excellent there while
+    being untested.  On AIB9 the optimal ridge varies ~400x across three direction
+    seeds at fixed M, so its argmin is not a stable target -- what is stable is
+    that any extensive rule stays inside the (very wide) optimal basin.
+
+    ``'auto'`` (default) scales to the effective sample size only:
+
+        η = max(1e-12, 1 / √N_eff)
+
+    with ``N_eff = (Σw)² / Σw²`` for non-uniform weights and ``N_eff = N`` for
+    uniform weights.  It is M-blind, which is what makes the error degrade as
+    directions are added: on 2D against the exact PDE oracle the true Dirichlet
+    error rises 3.7x over M = 32..2048 under ``'auto'`` and is flat to 2% under a
+    single constant ``lam`` (``docs/degradation_with_M.md``).  ``'auto'`` remains
+    the default only for backward compatibility.
+
+    Returns ``(eta_value, N_eff)``; ``N_eff`` is None when ``eta`` is a bare float.
     """
+    AUTO_LAMBDA = 1.8e-4
+    AUTO_LAMBDA_N0 = 1.0e5  # the N the constant was calibrated at
+
+    if isinstance(eta, (tuple, list)) or eta == "auto_lambda":
+        if isinstance(eta, str):
+            val = AUTO_LAMBDA
+            n_eff = _effective_n(sample_weights, N)
+            if n_eff is None:
+                raise ValueError(
+                    "eta='auto_lambda' requires either sample_weights or N: the "
+                    "rule scales as 1/N_eff, and dropping that factor is only "
+                    "correct at N = 1e5. Pass ('lambda', lam) to opt out."
+                )
+            val = val * AUTO_LAMBDA_N0 / n_eff
+        else:
+            kind, val = eta
+            if kind == "ridge_abs":
+                # An ABSOLUTE ridge, in the units of G itself.  The caller
+                # multiplies eta by median(diag G_valid), so divide it out.  This
+                # is how the calibration-free selectors hand their answer back:
+                # they choose a ridge in physical units, not a dimensionless
+                # multiplier, and must not be re-scaled by an anchor on the way in.
+                valid = jnp.asarray(valid_mask).astype(jnp.float64)
+                if G is None:
+                    raise ValueError("eta=('ridge_abs', r) requires G.")
+                diag = np.asarray(jnp.diag(jnp.asarray(G)), dtype=np.float64)
+                keep = np.asarray(valid > 0) & np.isfinite(diag) & (diag > 0)
+                med = float(np.median(diag[keep])) if keep.sum() else 0.0
+                if not (np.isfinite(med) and med > 0):
+                    raise ValueError("eta=('ridge_abs', r): median(diag G_valid) is not positive.")
+                return max(1e-12, float(val) / med), None
+            if kind != "lambda":
+                raise ValueError(
+                    f"Unknown eta form: {eta!r}; expected ('lambda', value) or "
+                    f"('ridge_abs', value)."
+                )
+        valid = jnp.asarray(valid_mask).astype(jnp.float64)
+        M_valid = max(float(jnp.sum(valid)), 1.0)
+        if G is None:
+            return max(1e-12, float(val) * M_valid), None
+        diag = np.asarray(jnp.diag(jnp.asarray(G)), dtype=np.float64)
+        keep = np.asarray(valid > 0) & np.isfinite(diag) & (diag > 0)
+        if keep.sum() < 1:
+            return max(1e-12, float(val) * M_valid), None
+        geo = float(np.exp(np.mean(np.log(diag[keep]))))
+        med = float(np.median(diag[keep]))
+        if not (np.isfinite(geo) and geo > 0 and np.isfinite(med) and med > 0):
+            return max(1e-12, float(val) * M_valid), None
+        # The caller multiplies eta by median(diag G_valid), so dividing it out
+        # here makes the delivered absolute ridge exactly lam * M * geomean.
+        return max(1e-12, float(val) * M_valid * geo / med), None
     if isinstance(eta, str):
-        if eta != "auto":
+        if eta not in ("auto", "auto_m"):
             raise ValueError(f"Unknown eta string: {eta!r}")
         if sample_weights is not None:
             W = jnp.asarray(sample_weights)
@@ -608,7 +799,10 @@ def _resolve_eta(eta, M, valid_mask, sample_weights=None, N=None):
         elif N is not None:
             N_eff_val = float(N)
         else:
-            raise ValueError("eta='auto' requires either sample_weights or N.")
+            raise ValueError(f"eta={eta!r} requires either sample_weights or N.")
+        if eta == "auto_m":
+            M_valid = float(jnp.sum(jnp.asarray(valid_mask).astype(jnp.float64)))
+            return max(1e-12, max(M_valid, 1.0) / N_eff_val), N_eff_val
         return max(1e-12, 1.0 / (N_eff_val**0.5)), N_eff_val
     return float(eta), None
 
@@ -721,7 +915,7 @@ def _solve_constrained_gram_jit(G, b, valid_mask, eta_val, constraint="sum"):
 
     # --- Silent-degradation diagnostics (Issue A) ---
     # When b is near-proportional to 1, v → 0 and w → u (inverse-Dirichlet
-    # base): the Gram/GFI machinery contributes nothing. These three scalars
+    # base): the Gram/FFI machinery contributes nothing. These three scalars
     # make that failure mode observable without changing the solution.
     Dq_v = Dq_hat_out * v_out
     u_norm = jnp.linalg.norm(u_out)
@@ -730,7 +924,7 @@ def _solve_constrained_gram_jit(G, b, valid_mask, eta_val, constraint="sum"):
     mean_b_magnitude = jnp.sum(jnp.abs(b_masked)) / n_valid_f
     fraction_b_negative = jnp.sum(((b_masked < 0) & (valid > 0)).astype(G.dtype)) / n_valid_f
 
-    # σ_M = 1 / ((1−ε)ᵀ G⁻¹ (1−ε)) = 1/P: the GFI upper bound on D[q].
+    # σ_M = 1 / ((1−ε)ᵀ G⁻¹ (1−ε)) = 1/P: the FFI upper bound on D[q].
     # Under constraint='flux', σ_M coincides with Dq_hat by construction;
     # under 'sum', Dq_hat is the self-consistent estimate and σ_M is the
     # bound (always ≥ true D[q] in the noise-free limit). Use |P| because
@@ -814,7 +1008,7 @@ def _solve_constrained_gram(
         G_reg, or NaN when ``compute_condition_number=False``), eta_used,
         N_eff (populated when eta='auto'), constraint.
 
-        ``sigma_M = 1 / ((1−ε)ᵀ G⁻¹ (1−ε))`` is the GFI upper bound on D[q]:
+        ``sigma_M = 1 / ((1−ε)ᵀ G⁻¹ (1−ε))`` is the FFI upper bound on D[q]:
         always ≥ true D[q] in the noise-free limit. Under ``constraint='flux'``
         it equals ``Dq_hat`` by construction; under ``'sum'`` ``Dq_hat`` is a
         self-consistent estimate while ``sigma_M`` is the bound. Use
@@ -824,7 +1018,7 @@ def _solve_constrained_gram(
     M = G.shape[0]
 
     # Resolve Tikhonov (Issue 3: 'auto' mode)
-    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N)
+    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N, G=G)
 
     out = _solve_constrained_gram_jit(G, b, valid_mask, eta_val, constraint=constraint)
 
@@ -1046,7 +1240,7 @@ def full_gram_weights(
 
     # Silent-degradation warning (Issue A): when the Gram correction ‖D̂·v‖
     # is small relative to ‖u‖, the constrained solve reduces to the
-    # inverse-Dirichlet base u and the Gram/GFI machinery has contributed
+    # inverse-Dirichlet base u and the Gram/FFI machinery has contributed
     # nothing. This usually signals that b is near-proportional to 1 (e.g.
     # uniform or uniformly-negative after saturation).
     if result["gram_correction_ratio"] < 0.05:

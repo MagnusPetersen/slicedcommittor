@@ -238,7 +238,7 @@ def solve_basin_moment(
         eta_used, N_eff: provenance.
     """
     M = G.shape[0]
-    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N)
+    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N, G=G)
 
     out = _solve_basin_moment_kkt(G, a, b, valid_mask, eta_val)
 

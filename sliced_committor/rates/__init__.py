@@ -19,6 +19,18 @@ Rates (return ``{nu_R, rho_A, rho_B, k_AB, k_BA, ...}``)::
 """
 
 from ._coordinate import PlateauWindow, Profile, find_plateau, value_at
+from .bridge import (
+    bayesian_smoluchowski_diffusion,
+    bootstrap_barrier_Ds,
+    committor_grad_profile,
+    committor_populations,
+    conditional_mean,
+    constancy_reconstruction,
+    flux_reductions,
+    hummer_Ds_profile,
+    mapped_committor_diffusion_field,
+    mapped_committor_diffusion_reparam,
+)
 from .formulas import (
     berezhkovskii_szabo_rate,
     committor_rate,
@@ -30,6 +42,7 @@ from .quantities import (
     BridgeD,
     density,
     diffusion_coefficient,
+    mapped_committor_diffusion,
     reactive_flux,
     saddle_bridge_D,
 )
@@ -40,7 +53,19 @@ __all__ = [
     "diffusion_coefficient",
     "reactive_flux",
     "saddle_bridge_D",
+    "mapped_committor_diffusion",
     "BridgeD",
+    # Bridge v2 (position-dependent / regressed / UQ)
+    "mapped_committor_diffusion_field",
+    "mapped_committor_diffusion_reparam",
+    "committor_grad_profile",
+    "conditional_mean",
+    "flux_reductions",
+    "committor_populations",
+    "hummer_Ds_profile",
+    "constancy_reconstruction",
+    "bootstrap_barrier_Ds",
+    "bayesian_smoluchowski_diffusion",
     # Rates
     "dirichlet_rate",
     "berezhkovskii_szabo_rate",

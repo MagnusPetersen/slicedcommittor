@@ -65,6 +65,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import vmap
 
 from ._bmc import compute_basin_moments
@@ -177,7 +178,7 @@ def solve_enriched_basin_moment(
         ``condition_number``, ``G_reg``, ``eta_used``, ``N_eff``.
     """
     M = G.shape[0]
-    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N)
+    eta_val, N_eff_val = _resolve_eta(eta, M, valid_mask, sample_weights, N, G=G)
 
     out = _solve_enriched_bmc_kkt(G, a, b, valid_mask, eta_val)
 
@@ -271,8 +272,15 @@ def enriched_basin_moment_weights(
             ``ctx.projected_samples`` is populated.
         sample_weights: ``(N,)`` optional MBAR weights; falls back to
             ``ctx.sample_weights``, then to uniform ``1/N``.
-        tikhonov: Gram regularisation. Float or ``'auto'`` (default,
-            N_eff-adaptive).
+        tikhonov: Gram regularisation. ``'auto'`` (default) is the closed-form
+            ``η = 1/√N_eff`` and needs no extra pass over the data. ``'cv'``
+            selects the ridge by minimising the held-out Dirichlet cap, so it
+            carries no fitted constant, and is what the paper's figures use; it
+            costs one extra assembly-equivalent (the folds partition the
+            samples) plus K eigendecompositions, so it is opt-in rather than the
+            default. Also accepts a float or ``'auto_lambda'``. ``'cv'`` is
+            implemented here and *only* here -- the full-Gram, plain-BMC, PESB
+            and Nitsche solvers do not accept it. See ``docs/ridge_rule.md``.
         raise_on_degenerate, cond_enriched_threshold: see
             :func:`solve_enriched_basin_moment`.
         gram_dtype: dtype for the dominant ``(M, N)×(N, M)`` inner product.
@@ -325,9 +333,55 @@ def enriched_basin_moment_weights(
     F_lo = F.astype(matmul_dtype)
     W_lo = W.astype(matmul_dtype)
     G = _assemble_gram_matrix(F_lo, W_lo, cos_matrix)
-    del F, F_lo, W_lo
+    want_cv = isinstance(tikhonov, str) and tikhonov == "cv"
+    if not want_cv:
+        # tikhonov='cv' needs F again for the per-fold Gram blocks; every other
+        # setting is done with it here, and at villin's M = 2048 the (M, N)
+        # buffer is 3.3 GB, so keep the early free as the default path.
+        del F, F_lo, W_lo
 
     a, b = compute_basin_moments(moments_ctx)
+
+    cv_info = None
+    # With fewer than two valid directions there is nothing to select: the
+    # constraint (b-a)'w = 1 then fixes w outright -- at M = 1,
+    # w = 1/(b_1 - a_1) whatever the ridge -- so the ridge cannot change the
+    # answer and cross-validating it is meaningless, not merely expensive.
+    # Fall back rather than raise: a ladder that sweeps M upward from 1 is a
+    # legitimate caller and should not have to special-case its first rung.
+    if want_cv:
+        n_valid = int(np.asarray(ctx.valid_mask, bool).sum())
+        if n_valid < 2:
+            logger.warning(
+                "tikhonov='cv': only %d valid direction(s); the moment constraint "
+                "already determines w, so the ridge is immaterial. Falling back "
+                "to 'auto'.",
+                n_valid,
+            )
+            want_cv = False
+            tikhonov = "auto"
+    if want_cv:
+        # Calibration-free ridge: minimise the HELD-OUT cap, 1-SE rule.  Costs one
+        # extra assembly-equivalent (the folds partition the samples) plus K
+        # eigendecompositions.  See ``_ridge_cv`` and ``docs/ridge_rule.md``.
+        from ._ridge_cv import (
+            DEFAULT_N_FOLDS,
+            fold_basin_moments,
+            fold_gram_blocks,
+            make_folds,
+            select_ridge_cv,
+        )
+
+        # Stratify by basin so every fold holds A, B and transition samples;
+        # blocks stay contiguous within each stratum, which is what keeps
+        # serially-correlated frames off both sides of the split.
+        strata = np.where(np.asarray(ctx.in_A, bool), 0, np.where(np.asarray(ctx.in_B, bool), 1, 2))
+        fold_of = make_folds(N, DEFAULT_N_FOLDS, contiguous=True, strata=strata)
+        G_folds, w_folds = fold_gram_blocks(F, W, cos_matrix, fold_of, DEFAULT_N_FOLDS)
+        a_folds, b_folds, wA, wB = fold_basin_moments(moments_ctx, fold_of, DEFAULT_N_FOLDS)
+        cv_info = select_ridge_cv(G_folds, w_folds, a_folds, b_folds, wA, wB, ctx.valid_mask)
+        tikhonov = ("ridge_abs", cv_info["ridge"])
+        del G_folds, a_folds, b_folds, F, F_lo, W_lo
 
     result = solve_enriched_basin_moment(
         G,
@@ -342,6 +396,13 @@ def enriched_basin_moment_weights(
     )
     result["G"] = G
     result["q_bar"] = jnp.zeros_like(result["w"])
+    if cv_info is not None:
+        result["ridge_cv"] = {
+            k: cv_info[k] for k in ("ridge", "anchor", "idx", "idx_argmin", "at_edge", "n_folds")
+        }
+        result["ridge_cv"]["curve"] = np.asarray(cv_info["curve"])
+        result["ridge_cv"]["grid"] = np.asarray(cv_info["grid"])
+        result["ridge_cv"]["se"] = np.asarray(cv_info["se"])
 
     _add_ebmc_diagnostics(result, G, a, b, ctx.valid_mask, ctx=ctx)
     return result

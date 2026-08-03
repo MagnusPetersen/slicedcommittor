@@ -47,14 +47,14 @@ keywords:
   - sliced-methods
   - jax
 license: MIT
-version: 0.4.0
-date-released: "2026-05-29"
+version: 0.6.0
+date-released: "2026-08-03"
 
 # The canonical scientific reference. This is what GitHub's
 # "Cite this repository" button surfaces to citation managers.
 preferred-citation:
   type: article
-  title: Committors and reaction rates from random one-dimensional projections
+  title: Committors and Reaction Rates from Trial Functions That Violate the Boundary Conditions
   authors:
     - family-names: Petersen
       given-names: Magnus

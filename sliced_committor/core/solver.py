@@ -1884,8 +1884,14 @@ def compute_enriched_basin_moment_weights(
             ``result.projected_samples`` is None.
         sample_weights: ``(N,)`` optional MBAR weights; falls back to
             ``result.sample_weights``, then to uniform ``1/N``.
-        tikhonov: Gram regularisation. Float or ``'auto'`` (default,
-            N_eff-adaptive).
+        tikhonov: Gram regularisation. ``'auto'`` (default) is the
+            closed-form ``η = 1/√N_eff``: no extra passes over the data, so it
+            is what the default should be. ``'cv'`` instead selects the ridge by
+            minimising the held-out Dirichlet cap, which carries no fitted
+            constant and is what the paper's figures use -- prefer it for
+            production fits, and note it costs one extra assembly-equivalent
+            plus K eigendecompositions. Also accepts a float or
+            ``'auto_lambda'``. See ``docs/ridge_rule.md``.
         raise_on_degenerate: if True (default), raise
             :class:`sliced_committor.EnrichedBMCRepresentationError` when
             ``cond_enriched`` falls below ``cond_enriched_threshold`` (the
@@ -1991,4 +1997,58 @@ def compute_enriched_basin_moment_weights_power(
         cond_enriched_threshold=cond_enriched_threshold,
         gram_dtype=gram_dtype,
         direction_batch_size=direction_batch_size,
+    )
+
+
+def compute_nitsche_weights(
+    result: SlicedCommittorResult,
+    samples: jnp.ndarray,
+    sample_weights: jnp.ndarray | None = None,
+    *,
+    beta_tilde: float = 1e3,
+    tikhonov: float | str = "auto",
+    gram_dtype: str = "float64",
+    chunk: int = 8192,
+) -> dict:
+    """Second-moment (Nitsche) weight solver -- strong basin boundary conditions.
+
+    EBMC pins the boundary conditions in the mean only, a single scalar
+    constraint on an M-dimensional weight vector. As M grows the minimiser
+    spends the surplus freedom lowering ``wᵀGw`` below the true committor's
+    energy, which it can only do by letting the true flux fidelity drift below
+    one, so the error rises while the objective falls. This solver replaces the
+    mean constraint with a penalty on the basin *second* moments::
+
+        min_{w,c}  wᵀGw + β [ ⟨q̄²⟩_A + ⟨(q̄−1)²⟩_B ]
+
+    Returned ansatz: ``q̄(x) = c + Σ_j w_j q_{θ_j}(θ_j·x)``, with ``'c'`` and
+    ``'q_bar'`` set so :func:`evaluate_committor` takes the centered-basis path.
+
+    Args:
+        result: the :class:`SlicedCommittorResult` from the fit.
+        samples: ``(N, dim)`` samples; unused when the result stores projections.
+        sample_weights: ``(N,)`` optional MBAR weights for the Gram.
+        beta_tilde: dimensionless penalty scale, ``β = beta_tilde·tr(G)/M``.
+            The ``O(1/β)`` consistency error and the conditioning cost pull in
+            opposite directions; check ``bc_resid_A`` / ``bc_resid_B``.
+        tikhonov: ridge on ``G``, matching EBMC's convention.
+        gram_dtype: dtype for the dominant ``(M, N)×(N, M)`` inner product.
+        chunk: sample-chunk size for the second-moment accumulation.
+
+    Returns:
+        dict with ``w``, ``c``, ``q_bar``, ``a``, ``b``, ``G``, ``beta_used``,
+        the BC residuals ``bc_resid_A`` / ``bc_resid_B``, and the unconstrained
+        mean checks ``mu_A_check`` / ``mu_B_check``.
+    """
+    from ._nitsche import nitsche_weights
+
+    ctx = make_weighting_context(result)
+    return nitsche_weights(
+        ctx,
+        samples,
+        sample_weights,
+        beta_tilde=beta_tilde,
+        tikhonov=tikhonov,
+        gram_dtype=gram_dtype,
+        chunk=chunk,
     )

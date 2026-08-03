@@ -26,6 +26,7 @@ from .quantities import (
     _coarea_profile,
     _density_and_diffusion,
     _plateau_flux,
+    density,
 )
 
 
@@ -104,6 +105,8 @@ def _committor_profiles(
     lag_candidates,
     min_count,
     diffusion_method,
+    per_window=False,
+    D_profile=None,
 ):
     """The coordinate-invariant pair ``{D_q(q), π(q)}`` on one common grid.
 
@@ -113,22 +116,33 @@ def _committor_profiles(
     functions of the committor VALUES q(x) only -- dimensionless and identical
     in any feature space -- so every reduction built on them is coordinate-
     invariant (no feature-space gradient, no length-scale D).
+
+    ``D_profile`` (a precomputed committor-coordinate diffusion :class:`Profile`,
+    e.g. from :func:`mapped_committor_diffusion`) bypasses the trajectory estimate
+    and is interpolated onto π's grid directly.
     """
-    pi_prof, D_prof = _density_and_diffusion(
-        committor,
-        samples,
-        trajectory,
-        dt=dt,
-        n_bins=n_bins,
-        sample_weights=sample_weights,
-        window_ids=window_ids,
-        coordinate=coordinate,
-        traj_coordinate=traj_coordinate,
-        lag=lag,
-        lag_candidates=lag_candidates,
-        min_count=min_count,
-        diffusion_method=diffusion_method,
-    )
+    if D_profile is not None:
+        pi_prof = density(
+            committor, samples, sample_weights=sample_weights, n_bins=n_bins, coordinate=coordinate
+        )
+        D_prof = D_profile
+    else:
+        pi_prof, D_prof = _density_and_diffusion(
+            committor,
+            samples,
+            trajectory,
+            dt=dt,
+            n_bins=n_bins,
+            sample_weights=sample_weights,
+            window_ids=window_ids,
+            coordinate=coordinate,
+            traj_coordinate=traj_coordinate,
+            lag=lag,
+            lag_candidates=lag_candidates,
+            min_count=min_count,
+            diffusion_method=diffusion_method,
+            per_window=per_window,
+        )
     centers = np.asarray(pi_prof.levels, dtype=np.float64)
     pi = np.where(np.isfinite(pi_prof.values), pi_prof.values, 0.0)
     goodD = np.isfinite(D_prof.values) & (D_prof.values > 0)
@@ -291,6 +305,7 @@ def berezhkovskii_szabo_rate(
     coordinate=None,
     traj_coordinate=None,
     diffusion_method="kramers_moyal",
+    per_window=False,
 ):
     """Berezhkovskii-Szabo rate on the committor coordinate.
 
@@ -337,6 +352,7 @@ def berezhkovskii_szabo_rate(
         coordinate=coordinate,
         traj_coordinate=traj_coordinate,
         diffusion_method=diffusion_method,
+        per_window=per_window,
     )
     out["mode"] = mode
     return out
@@ -378,6 +394,7 @@ def kramers_rate(
     window_ids=None,
     min_count=5,
     diffusion_method="kramers_moyal",
+    per_window=False,
 ):
     """Overdamped Kramers barrier-crossing rate estimate.
 
@@ -411,6 +428,7 @@ def kramers_rate(
         lag_candidates=lag_candidates,
         min_count=min_count,
         diffusion_method=diffusion_method,
+        per_window=per_window,
     )
     centers = pi_prof.levels
     pi = pi_prof.values
@@ -472,6 +490,8 @@ def committor_rate(
     coordinate=None,
     traj_coordinate=None,
     diffusion_method="kramers_moyal",
+    per_window=False,
+    D_profile=None,
 ):
     """Unified committor-coordinate reaction rate from the pair ``{D_q(q), π(q)}``.
 
@@ -506,6 +526,10 @@ def committor_rate(
             ``[0, 1]``).
         diffusion_method: ``"kramers_moyal"`` or ``"hummer"`` (lag-robust;
             needs ``window_ids``).
+        D_profile: optional precomputed committor-coordinate diffusion
+            :class:`Profile` (e.g. from :func:`mapped_committor_diffusion`); when
+            given it is used as ``D_q`` directly and the trajectory estimate is
+            skipped.
         (remaining args forwarded to :func:`density` / :func:`diffusion_coefficient`.)
 
     Returns:
@@ -526,6 +550,8 @@ def committor_rate(
         lag_candidates=lag_candidates,
         min_count=min_count,
         diffusion_method=diffusion_method,
+        per_window=per_window,
+        D_profile=D_profile,
     )
     rho_A, rho_B = _populations(committor, samples, sample_weights, in_A, in_B)
     red = reduction.lower()
