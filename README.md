@@ -49,8 +49,7 @@ Instead of solving the full committor PDE in d dimensions, the algorithm:
    solution that strictly improves on the vanilla BMC simplex in Dirichlet
    energy. A higher-order variant (**PESB-EBMC**) augments each per-slice
    basis with a smoothstep family `Ψ_n(v) = v^n / (v^n + (1-v)^n)` for
-   additional resolving power on heterogeneous transitions. Diagonal RD
-   and full-Gram simplex solvers remain available for compatibility.
+   additional resolving power on heterogeneous transitions.
 
 ## Theory primer
 
@@ -76,8 +75,7 @@ The sliced approach replaces the d-dimensional solve with `M` independent
 
 The recommended weight solver (**EBMC**) computes `w, c` in closed form via
 a single regularised Gram solve; the higher-order **PESB-EBMC** variant
-enriches the per-slice basis with smoothstep functions `Ψ_n(v)`. Both fall
-back gracefully on a diagonal-RD or full-Gram simplex aggregator.
+enriches the per-slice basis with smoothstep functions `Ψ_n(v)`.
 
 A boundary-error term `ε_j` measures how far the 1D solve fails to hit
 `q = 0` / `q = 1` at the projected basin edges; weights are corrected by
@@ -229,11 +227,6 @@ pesb = compute_enriched_basin_moment_weights_power(
 q = build_committor(result, pesb)        # callable committor; q(points)
 print("Dirichlet improvement over plain EBMC:", pesb["improvement_over_ebmc"])
 ```
-
-Only the smoothstep ("softmix") basis is shipped: the monomial alternative
-was disconfirmed (asymmetric around `v = 0.5`, Hilbert-like within-block
-conditioning at large P). `P = 2` is a robust default; `P = 3` is the
-practical ceiling.
 
 ## All weight solvers
 
