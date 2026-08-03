@@ -328,30 +328,6 @@ from sliced_committor import (
 )
 ```
 
-## Why no `beta` argument?
-
-The committor is β-invariant given fixed samples: the algorithm computes
-`F = -(1/β) log ρ` from histogram density, then uses `ρ = exp(-β(F - F_min))`
-internally; the two β's cancel. Verified numerically across every downstream
-output (committors, all weight solvers, all ε estimators, and the rate
-estimators). Including β in the API would be misleading; the library uses
-β = 1 internally so `result.free_energies` stores `-log ρ` directly. Multiply
-by `1/β_physical` to recover physical-units free energy.
-
-## Why bool arrays instead of state functions?
-
-The method only needs to know *which* training samples are in A vs B. State
-functions (geometric expressions, RMSD thresholds, clustering output …) are
-how *you* compute those labels; the library doesn't need to inspect that
-logic. Boundary enforcement at evaluation points uses the same mechanism:
-pass `in_A` / `in_B` arrays for the points being evaluated.
-
-This means:
-- a user with cluster labels has nothing to wrap;
-- a user with a geometric state writes one line:
-  `in_A = jnp.linalg.norm(samples - centre, axis=-1) < radius`;
-- no `FunctionalState` class to learn or maintain.
-
 ## Memory note
 
 `compute_sliced_committor(..., store_projected_samples=True)` (the default)
