@@ -343,6 +343,21 @@ def enriched_basin_moment_weights(
     a, b = compute_basin_moments(moments_ctx)
 
     cv_info = None
+    # With fewer than two valid directions there is nothing to select: the
+    # constraint (b-a)'w = 1 then fixes w outright -- at M = 1,
+    # w = 1/(b_1 - a_1) whatever the ridge -- so the ridge cannot change the
+    # answer and cross-validating it is meaningless, not merely expensive.
+    # Fall back rather than raise: a ladder that sweeps M upward from 1 is a
+    # legitimate caller and should not have to special-case its first rung.
+    if want_cv:
+        n_valid = int(np.asarray(ctx.valid_mask, bool).sum())
+        if n_valid < 2:
+            logger.warning(
+                "tikhonov='cv': only %d valid direction(s); the moment constraint "
+                "already determines w, so the ridge is immaterial. Falling back "
+                "to 'auto'.", n_valid)
+            want_cv = False
+            tikhonov = "auto"
     if want_cv:
         # Calibration-free ridge: minimise the HELD-OUT cap, 1-SE rule.  Costs one
         # extra assembly-equivalent (the folds partition the samples) plus K
