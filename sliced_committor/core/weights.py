@@ -737,7 +737,7 @@ def _resolve_eta(eta, M, valid_mask, sample_weights=None, N=None, G=None):
     Returns ``(eta_value, N_eff)``; ``N_eff`` is None when ``eta`` is a bare float.
     """
     AUTO_LAMBDA = 1.8e-4
-    AUTO_LAMBDA_N0 = 1.0e5          # the N the constant was calibrated at
+    AUTO_LAMBDA_N0 = 1.0e5  # the N the constant was calibrated at
 
     if isinstance(eta, (tuple, list)) or eta == "auto_lambda":
         if isinstance(eta, str):
@@ -765,9 +765,7 @@ def _resolve_eta(eta, M, valid_mask, sample_weights=None, N=None, G=None):
                 keep = np.asarray(valid > 0) & np.isfinite(diag) & (diag > 0)
                 med = float(np.median(diag[keep])) if keep.sum() else 0.0
                 if not (np.isfinite(med) and med > 0):
-                    raise ValueError(
-                        "eta=('ridge_abs', r): median(diag G_valid) is not positive."
-                    )
+                    raise ValueError("eta=('ridge_abs', r): median(diag G_valid) is not positive.")
                 return max(1e-12, float(val) / med), None
             if kind != "lambda":
                 raise ValueError(

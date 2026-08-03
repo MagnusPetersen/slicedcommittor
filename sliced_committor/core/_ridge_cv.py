@@ -122,7 +122,7 @@ def make_folds(N: int, n_folds: int, *, contiguous: bool = True, strata=None):
     strata = np.asarray(strata)
     out = np.empty(N, np.int64)
     for s in np.unique(strata):
-        idx = np.flatnonzero(strata == s)          # already in time order
+        idx = np.flatnonzero(strata == s)  # already in time order
         out[idx] = (np.arange(len(idx)) * n_folds) // max(len(idx), 1)
     return out
 
@@ -139,9 +139,9 @@ def fold_gram_blocks(F, W, cos_matrix, fold_of, n_folds):
     Each block is normalised by its own weight sum, so the caller can form any
     train/test combination as a weighted mean.
     """
-    from .gram import _assemble_gram_matrix
-
     import jax.numpy as jnp
+
+    from .gram import _assemble_gram_matrix
 
     fold_of = np.asarray(fold_of)
     G_folds, w_folds = [], []
@@ -162,8 +162,7 @@ def fold_gram_blocks(F, W, cos_matrix, fold_of, n_folds):
         tot = float(jnp.sum(Wk))
         if tot <= 0:
             raise ValueError(f"fold_gram_blocks: fold {k} carries zero weight.")
-        G_folds.append(np.asarray(_assemble_gram_matrix(
-            Fk, Wk / tot, cos_matrix), np.float64))
+        G_folds.append(np.asarray(_assemble_gram_matrix(Fk, Wk / tot, cos_matrix), np.float64))
         w_folds.append(tot)
         del Fk, Wk
     return np.stack(G_folds), np.asarray(w_folds, np.float64)
@@ -223,10 +222,8 @@ def fold_basin_moments(ctx, fold_of, n_folds, batch_size: int = 512):
         qA = _interpolate_q_at_samples_masked(s_grid, q_grid, ps, in_A_j)
         qB = _interpolate_q_at_samples_masked(s_grid, q_grid, ps, in_B_j)
         for k in range(n_folds):
-            a[k, start:end] = np.asarray(
-                jnp.sum(jnp.where(fold_j[k], qA, 0.0), axis=1)) / wA[k]
-            b[k, start:end] = np.asarray(
-                jnp.sum(jnp.where(fold_j[k], qB, 0.0), axis=1)) / wB[k]
+            a[k, start:end] = np.asarray(jnp.sum(jnp.where(fold_j[k], qA, 0.0), axis=1)) / wA[k]
+            b[k, start:end] = np.asarray(jnp.sum(jnp.where(fold_j[k], qB, 0.0), axis=1)) / wB[k]
         del qA, qB
     return a, b, wA, wB
 
@@ -306,7 +303,7 @@ def select_ridge_cv(
         atr = (wA_folds[other] @ af[other]) / max(wA_folds[other].sum(), 1e-300)
         btr = (wB_folds[other] @ bf[other]) / max(wB_folds[other].sum(), 1e-300)
         if wA_folds[k] <= 0 or wB_folds[k] <= 0:
-            continue                      # fold holds no samples of some basin
+            continue  # fold holds no samples of some basin
         L, V = np.linalg.eigh(0.5 * (Gtr + Gtr.T))
         L = np.maximum(L, 0.0)
         dv = V.T @ (btr - atr)
@@ -317,7 +314,7 @@ def select_ridge_cv(
                 continue
             gap = float(dte @ w)
             if abs(gap) > 1e-30:
-                caps[k, i] = float(w @ Gf[k] @ w) / gap ** 2
+                caps[k, i] = float(w @ Gf[k] @ w) / gap**2
 
     with np.errstate(invalid="ignore"):
         mean = np.nanmean(caps, axis=0)
@@ -338,13 +335,15 @@ def select_ridge_cv(
     # 1.08-1.16x for the bare argmin).  The paired SE is the uncertainty in the
     # comparison actually being made.
     with np.errstate(invalid="ignore"):
-        d = caps - caps[:, i_best: i_best + 1]
+        d = caps - caps[:, i_best : i_best + 1]
         se_paired = np.nanstd(d, axis=0, ddof=1) / np.sqrt(np.maximum(n_ok, 1))
 
     tol = {"paired": se_paired, True: se}.get(one_se)
     if tol is not None and np.isfinite(tol[i_best]):
-        ok = np.flatnonzero((scored - mean[i_best] <= np.where(
-            np.isfinite(tol), tol, -np.inf)) & (np.arange(n_ridge) >= i_best))
+        ok = np.flatnonzero(
+            (scored - mean[i_best] <= np.where(np.isfinite(tol), tol, -np.inf))
+            & (np.arange(n_ridge) >= i_best)
+        )
         if len(ok):
             i_sel = int(ok.max())
 
@@ -353,9 +352,19 @@ def select_ridge_cv(
         logger.warning(
             "select_ridge_cv: selected ridge is at the edge of the search grid "
             "(r/anchor = %.2e); the optimum may lie outside [%g, %g] * anchor.",
-            grid[i_sel] / anchor, RIDGE_LO, RIDGE_HI,
+            grid[i_sel] / anchor,
+            RIDGE_LO,
+            RIDGE_HI,
         )
-    return dict(ridge=float(grid[i_sel]), anchor=float(anchor),
-                idx=int(i_sel), idx_argmin=int(i_best), at_edge=bool(at_edge),
-                grid=grid, curve=mean, se=se, se_paired=se_paired,
-                n_folds=int(K))
+    return dict(
+        ridge=float(grid[i_sel]),
+        anchor=float(anchor),
+        idx=int(i_sel),
+        idx_argmin=int(i_best),
+        at_edge=bool(at_edge),
+        grid=grid,
+        curve=mean,
+        se=se,
+        se_paired=se_paired,
+        n_folds=int(K),
+    )

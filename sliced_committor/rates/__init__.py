@@ -19,13 +19,6 @@ Rates (return ``{nu_R, rho_A, rho_B, k_AB, k_BA, ...}``)::
 """
 
 from ._coordinate import PlateauWindow, Profile, find_plateau, value_at
-from .formulas import (
-    berezhkovskii_szabo_rate,
-    committor_rate,
-    dirichlet_rate,
-    kramers_rate,
-    tpt_rate,
-)
 from .bridge import (
     bayesian_smoluchowski_diffusion,
     bootstrap_barrier_Ds,
@@ -37,6 +30,13 @@ from .bridge import (
     hummer_Ds_profile,
     mapped_committor_diffusion_field,
     mapped_committor_diffusion_reparam,
+)
+from .formulas import (
+    berezhkovskii_szabo_rate,
+    committor_rate,
+    dirichlet_rate,
+    kramers_rate,
+    tpt_rate,
 )
 from .quantities import (
     BridgeD,

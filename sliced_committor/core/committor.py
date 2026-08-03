@@ -334,8 +334,7 @@ def _solve_weights(result, samples, weights, weight_kwargs):
     return weights  # precomputed array or dict
 
 
-def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs,
-                    weights, weight_kwargs):
+def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs, weights, weight_kwargs):
     """Absolute ridge from K-fold CV with the BASIS REBUILT on each training set.
 
     For each fold: fit a fresh sliced committor on the training samples, assemble
@@ -349,10 +348,14 @@ def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs,
     """
     import numpy as np
 
-    from ._ridge_cv import (
-        DEFAULT_N_FOLDS, DEFAULT_N_RIDGE, RIDGE_HI, RIDGE_LO, make_folds,
-    )
     from ._bmc import compute_basin_moments
+    from ._ridge_cv import (
+        DEFAULT_N_FOLDS,
+        DEFAULT_N_RIDGE,
+        RIDGE_HI,
+        RIDGE_LO,
+        make_folds,
+    )
     from .gram import _assemble_gram_matrix, _compute_derivative_matrix
     from .solver import make_weighting_context
 
@@ -366,14 +369,15 @@ def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs,
         """(G, a, b) for the basis in ``res``, evaluated at ``samples[idx]``."""
         ctx = make_weighting_context(res)
         proj = ctx.directions @ jnp.asarray(X[idx]).T
-        sub = ctx._replace(projected_samples=proj,
-                           in_A=jnp.asarray(inA[idx]), in_B=jnp.asarray(inB[idx]),
-                           sample_weights=None)
+        sub = ctx._replace(
+            projected_samples=proj,
+            in_A=jnp.asarray(inA[idx]),
+            in_B=jnp.asarray(inB[idx]),
+            sample_weights=None,
+        )
         F = _compute_derivative_matrix(sub, proj)
-        cos = (ctx.cos_matrix if ctx.cos_matrix is not None
-               else ctx.directions @ ctx.directions.T)
-        G = _assemble_gram_matrix(F.astype(jnp.float64),
-                                  jnp.full(len(idx), 1.0 / len(idx)), cos)
+        cos = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+        G = _assemble_gram_matrix(F.astype(jnp.float64), jnp.full(len(idx), 1.0 / len(idx)), cos)
         a, b = compute_basin_moments(sub)
         return np.asarray(G, np.float64), np.asarray(a), np.asarray(b)
 
@@ -383,8 +387,13 @@ def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs,
         te = np.flatnonzero(fold_of == k)
         tr = np.flatnonzero(fold_of != k)
         res_k = compute_sliced_committor(
-            jnp.asarray(X[tr]), in_A=jnp.asarray(inA[tr]), in_B=jnp.asarray(inB[tr]),
-            n_directions=n_directions, seed=seed, **solver_kwargs)
+            jnp.asarray(X[tr]),
+            in_A=jnp.asarray(inA[tr]),
+            in_B=jnp.asarray(inB[tr]),
+            n_directions=n_directions,
+            seed=seed,
+            **solver_kwargs,
+        )
         Gtr, atr, btr = assemble(res_k, tr)
         Gte, ate, bte = assemble(res_k, te)
         keep = np.asarray(res_k.valid_mask, bool)
@@ -405,7 +414,7 @@ def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs,
             w = (V @ (dv / (L + r))) / s
             gap = float(dte @ w)
             if abs(gap) > 1e-30:
-                caps[k, i] = float(w @ Gte_s @ w) / gap ** 2
+                caps[k, i] = float(w @ Gte_s @ w) / gap**2
         del res_k, Gtr, Gte
 
     with np.errstate(invalid="ignore"):
@@ -479,8 +488,9 @@ def fit_committor(
         # Costs K basis builds; the assembly stays ~1x because folds partition.
         weight_kwargs["tikhonov"] = (
             "ridge_abs",
-            _cv_refit_ridge(samples, in_A, in_B, n_directions, seed,
-                            solver_kwargs, weights, weight_kwargs),
+            _cv_refit_ridge(
+                samples, in_A, in_B, n_directions, seed, solver_kwargs, weights, weight_kwargs
+            ),
         )
     w = _solve_weights(result, samples, weights, weight_kwargs)
     q = build_committor(result, w, **(build_kwargs or {}))

@@ -136,12 +136,11 @@ def compute_basin_second_moments(ctx, chunk: int = 8192):
         n = int(idx.shape[0])
         if n < 50:
             logger.warning(
-                "nitsche: basin sample count low (n=%d); the second-moment "
-                "Gram will be noisy.", n
+                "nitsche: basin sample count low (n=%d); the second-moment Gram will be noisy.", n
             )
         P = jnp.zeros((M, M), dtype=jnp.float64)
         for start in range(0, n, chunk):
-            sub = idx[start:start + chunk]
+            sub = idx[start : start + chunk]
             Q = _q_at(slice_coords, q_1d, S[:, sub])
             P = P + Q @ Q.T
             del Q
@@ -152,8 +151,9 @@ def compute_basin_second_moments(ctx, chunk: int = 8192):
 # --------------------------------------------------------------------------- #
 # the (M+1) x (M+1) solve
 # --------------------------------------------------------------------------- #
-def solve_nitsche(G, PA, PB, a, b, valid_mask, *, beta_tilde=1e3, eta="auto",
-                  sample_weights=None, N=None):
+def solve_nitsche(
+    G, PA, PB, a, b, valid_mask, *, beta_tilde=1e3, eta="auto", sample_weights=None, N=None
+):
     """Solve the second-moment-penalised system; returns a weight dict.
 
     ``beta = beta_tilde * mean(diag(G)_valid)`` non-dimensionalises the penalty:
@@ -173,7 +173,7 @@ def solve_nitsche(G, PA, PB, a, b, valid_mask, *, beta_tilde=1e3, eta="auto",
 
     mask_2d = valid[:, None] * valid[None, :]
     diag_G = jnp.where(valid > 0, jnp.diag(G), 0.0)
-    scale = jnp.sum(diag_G) / n_valid                       # tr(G)_valid / M_valid
+    scale = jnp.sum(diag_G) / n_valid  # tr(G)_valid / M_valid
     scale = jnp.where(jnp.isfinite(scale) & (scale > 0), scale, 1.0)
     beta = beta_tilde * scale
 
@@ -300,8 +300,7 @@ def nitsche_weights(
     W = sample_weights if sample_weights is not None else jnp.ones(N) / N
 
     F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = (ctx.cos_matrix if ctx.cos_matrix is not None
-                  else ctx.directions @ ctx.directions.T)
+    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
     matmul_dtype = jnp.dtype(gram_dtype)
     G = _assemble_gram_matrix(F.astype(matmul_dtype), W.astype(matmul_dtype), cos_matrix)
     del F
@@ -310,9 +309,16 @@ def nitsche_weights(
     PA, PB = compute_basin_second_moments(moments_ctx, chunk=chunk)
 
     result = solve_nitsche(
-        G, PA, PB, a, b, ctx.valid_mask,
-        beta_tilde=beta_tilde, eta=tikhonov,
-        sample_weights=sample_weights, N=N,
+        G,
+        PA,
+        PB,
+        a,
+        b,
+        ctx.valid_mask,
+        beta_tilde=beta_tilde,
+        eta=tikhonov,
+        sample_weights=sample_weights,
+        N=N,
     )
     result["G"] = G
     result["q_bar"] = jnp.zeros_like(result["w"])

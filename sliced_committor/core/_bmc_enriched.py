@@ -355,7 +355,9 @@ def enriched_basin_moment_weights(
             logger.warning(
                 "tikhonov='cv': only %d valid direction(s); the moment constraint "
                 "already determines w, so the ridge is immaterial. Falling back "
-                "to 'auto'.", n_valid)
+                "to 'auto'.",
+                n_valid,
+            )
             want_cv = False
             tikhonov = "auto"
     if want_cv:
@@ -363,22 +365,21 @@ def enriched_basin_moment_weights(
         # extra assembly-equivalent (the folds partition the samples) plus K
         # eigendecompositions.  See ``_ridge_cv`` and ``docs/ridge_rule.md``.
         from ._ridge_cv import (
-            DEFAULT_N_FOLDS, fold_basin_moments, fold_gram_blocks, make_folds,
+            DEFAULT_N_FOLDS,
+            fold_basin_moments,
+            fold_gram_blocks,
+            make_folds,
             select_ridge_cv,
         )
 
         # Stratify by basin so every fold holds A, B and transition samples;
         # blocks stay contiguous within each stratum, which is what keeps
         # serially-correlated frames off both sides of the split.
-        strata = np.where(np.asarray(ctx.in_A, bool), 0,
-                          np.where(np.asarray(ctx.in_B, bool), 1, 2))
+        strata = np.where(np.asarray(ctx.in_A, bool), 0, np.where(np.asarray(ctx.in_B, bool), 1, 2))
         fold_of = make_folds(N, DEFAULT_N_FOLDS, contiguous=True, strata=strata)
-        G_folds, w_folds = fold_gram_blocks(
-            F, W, cos_matrix, fold_of, DEFAULT_N_FOLDS)
-        a_folds, b_folds, wA, wB = fold_basin_moments(
-            moments_ctx, fold_of, DEFAULT_N_FOLDS)
-        cv_info = select_ridge_cv(G_folds, w_folds, a_folds, b_folds, wA, wB,
-                                  ctx.valid_mask)
+        G_folds, w_folds = fold_gram_blocks(F, W, cos_matrix, fold_of, DEFAULT_N_FOLDS)
+        a_folds, b_folds, wA, wB = fold_basin_moments(moments_ctx, fold_of, DEFAULT_N_FOLDS)
+        cv_info = select_ridge_cv(G_folds, w_folds, a_folds, b_folds, wA, wB, ctx.valid_mask)
         tikhonov = ("ridge_abs", cv_info["ridge"])
         del G_folds, a_folds, b_folds, F, F_lo, W_lo
 
@@ -397,8 +398,7 @@ def enriched_basin_moment_weights(
     result["q_bar"] = jnp.zeros_like(result["w"])
     if cv_info is not None:
         result["ridge_cv"] = {
-            k: cv_info[k] for k in ("ridge", "anchor", "idx", "idx_argmin",
-                                    "at_edge", "n_folds")
+            k: cv_info[k] for k in ("ridge", "anchor", "idx", "idx_argmin", "at_edge", "n_folds")
         }
         result["ridge_cv"]["curve"] = np.asarray(cv_info["curve"])
         result["ridge_cv"]["grid"] = np.asarray(cv_info["grid"])

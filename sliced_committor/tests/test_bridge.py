@@ -5,6 +5,7 @@ Self-contained: reuses the 2D double-well equilibrium sampler and the windowed-O
 fixture; no external umbrella data needed. The full known-D0 validation ladder lives
 in ``experiments/bridge_v2.py``.
 """
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -67,8 +68,18 @@ def test_flux_reductions_match_committor_rate(committor2d):
     rho_A, rho_B = sc.committor_populations(np.asarray(q(s)))
     red = sc.flux_reductions(grid, pi, np.asarray(Dq.values), rho_A, rho_B, band=(0.3, 0.7))
     for reduction, key in (("arithmetic", "arithmetic"), ("harmonic", "harmonic")):
-        lib = sc.committor_rate(q, s, s, dt=0.01, D_profile=Dq, reduction=reduction, at=None,
-                                n_bins=n, in_A=in_A, in_B=in_B)
+        lib = sc.committor_rate(
+            q,
+            s,
+            s,
+            dt=0.01,
+            D_profile=Dq,
+            reduction=reduction,
+            at=None,
+            n_bins=n,
+            in_A=in_A,
+            in_B=in_B,
+        )
         assert red[key]["k_AB"] == pytest.approx(lib["k_AB"], rel=0.05), reduction
     assert np.isfinite(red["const_flux_mle"]["k_AB"])
     assert 0.0 <= red["flux_cv"] < 2.0
@@ -88,8 +99,10 @@ def test_field_reduces_to_scalar_when_D_constant(committor2d):
     s_centers = np.linspace(s_cv.min(), s_cv.max(), 20)
     D_s_prof = (s_centers, np.full_like(s_centers, D0))  # constant D_s
     field = sc.mapped_committor_diffusion_field(
-        q, s, D_s_profile=D_s_prof, cv_grad_sq=1.0, s_values=s_cv, n_bins=n, method="local_linear")
-    gs = np.asarray(scalar.values); gf = np.asarray(field.values)
+        q, s, D_s_profile=D_s_prof, cv_grad_sq=1.0, s_values=s_cv, n_bins=n, method="local_linear"
+    )
+    gs = np.asarray(scalar.values)
+    gf = np.asarray(field.values)
     grid = np.asarray(scalar.levels)
     m = (grid >= 0.3) & (grid <= 0.7) & np.isfinite(gs) & np.isfinite(gf) & (gs > 0)
     ratio = gf[m] / gs[m]
@@ -106,7 +119,8 @@ def test_reparam_runs_and_reports_r2(committor2d):
     s_centers = np.linspace(s_cv.min(), s_cv.max(), 20)
     D_s_prof = (s_centers, np.full_like(s_centers, 0.05))
     prof, info = sc.mapped_committor_diffusion_reparam(
-        q, s, D_s_profile=D_s_prof, s_values=s_cv, n_bins=120)
+        q, s, D_s_profile=D_s_prof, s_values=s_cv, n_bins=120
+    )
     assert "r2_monotone" in info and 0.0 <= info["r2_monotone"] <= 1.0
     good = np.isfinite(np.asarray(prof.values))
     assert good.sum() > 20
@@ -123,7 +137,8 @@ def test_hummer_Ds_profile_and_bootstrap_on_ou():
     # window bootstrap: q irrelevant here (all windows at same coordinate), use a dummy
     qx = np.full_like(x, 0.5)
     D_hat, boots, lo, hi = sc.bootstrap_barrier_Ds(
-        qx, x, np.ones_like(x), wid, dt=0.01, n_boot=50, seed=0)
+        qx, x, np.ones_like(x), wid, dt=0.01, n_boot=50, seed=0
+    )
     assert D_hat > 0 and boots.size > 0 and 0.0 < lo <= 1.0 <= hi
 
 
@@ -133,6 +148,7 @@ def test_hummer_Ds_profile_and_bootstrap_on_ou():
 def test_committor_grad_profile_positive(committor2d):
     q, s, in_A, in_B = committor2d
     prof, reg = sc.committor_grad_profile(q, s, n_bins=100, method="local_linear")
-    grid = np.asarray(prof.levels); vals = np.asarray(prof.values)
+    grid = np.asarray(prof.levels)
+    vals = np.asarray(prof.values)
     m = (grid >= 0.3) & (grid <= 0.7)
     assert np.all(np.isfinite(vals[m])) and np.all(vals[m] > 0)

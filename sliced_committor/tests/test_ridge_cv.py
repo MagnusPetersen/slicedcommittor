@@ -5,19 +5,22 @@ The rule is benchmarked in ``experiments/ridge_theory_rules.py`` and written up 
 rather than the numbers it happens to produce on any one system.
 """
 
+import jax
 import numpy as np
 import pytest
 
-import jax
-
 jax.config.update("jax_enable_x64", True)
 
-import jax.numpy as jnp  # noqa: E402
+import jax.numpy as jnp
 
-from sliced_committor.core._ridge_cv import (  # noqa: E402
-    RIDGE_HI, RIDGE_LO, fold_gram_blocks, make_folds, select_ridge_cv,
+from sliced_committor.core._ridge_cv import (
+    RIDGE_HI,
+    RIDGE_LO,
+    fold_gram_blocks,
+    make_folds,
+    select_ridge_cv,
 )
-from sliced_committor.core.weights import _resolve_eta  # noqa: E402
+from sliced_committor.core.weights import _resolve_eta
 
 
 # --------------------------------------------------------------------------- #
@@ -108,8 +111,15 @@ def _cv_inputs(M=10, N=800, dim=3, K=5, seed=1):
         b_f.append(rng.normal(size=M) * 0.05 + 0.9)
         wA.append(n / 3)
         wB.append(n / 3)
-    return (np.stack(G_folds), np.array(w_folds), np.stack(a_f), np.stack(b_f),
-            np.array(wA), np.array(wB), np.ones(M, bool))
+    return (
+        np.stack(G_folds),
+        np.array(w_folds),
+        np.stack(a_f),
+        np.stack(b_f),
+        np.array(wA),
+        np.array(wB),
+        np.ones(M, bool),
+    )
 
 
 def test_selector_returns_a_positive_ridge_inside_its_grid():
@@ -271,13 +281,22 @@ def test_fit_committor_accepts_tikhonov_cv_and_reports_the_ridge():
     N = 8000
     X = rng.normal(size=(N, 2)) * 0.6
     X[: N // 2, 0] -= 1.5
-    X[N // 2:, 0] += 1.5
+    X[N // 2 :, 0] += 1.5
     in_A, in_B = X[:, 0] < -1.2, X[:, 0] > 1.2
 
-    q, fit = fit_committor(X, in_A=in_A, in_B=in_B, n_directions=24, seed=0,
-                           return_details=True, n_bins=40, n_min=10,
-                           binning_method="quantile", weights="ebmc",
-                           weight_kwargs={"tikhonov": "cv"})
+    q, fit = fit_committor(
+        X,
+        in_A=in_A,
+        in_B=in_B,
+        n_directions=24,
+        seed=0,
+        return_details=True,
+        n_bins=40,
+        n_min=10,
+        binning_method="quantile",
+        weights="ebmc",
+        weight_kwargs={"tikhonov": "cv"},
+    )
     info = fit.weights["ridge_cv"]
     assert info["ridge"] > 0 and not info["at_edge"]
     assert info["n_folds"] == 5
@@ -299,15 +318,26 @@ def test_cv_refit_runs_end_to_end_and_is_deterministic():
     N = 6000
     X = rng.normal(size=(N, 2)) * 0.6
     X[: N // 2, 0] -= 1.5
-    X[N // 2:, 0] += 1.5
-    kw = dict(in_A=X[:, 0] < -1.2, in_B=X[:, 0] > 1.2, n_directions=16, seed=0,
-              return_details=True, n_bins=30, n_min=10,
-              binning_method="quantile", weights="ebmc")
+    X[N // 2 :, 0] += 1.5
+    kw = dict(
+        in_A=X[:, 0] < -1.2,
+        in_B=X[:, 0] > 1.2,
+        n_directions=16,
+        seed=0,
+        return_details=True,
+        n_bins=30,
+        n_min=10,
+        binning_method="quantile",
+        weights="ebmc",
+    )
 
     q1, f1 = fit_committor(X, weight_kwargs={"tikhonov": "cv_refit"}, **kw)
     q2, f2 = fit_committor(X, weight_kwargs={"tikhonov": "cv_refit"}, **kw)
-    assert np.isclose(float(f1["M_gap"] if isinstance(f1, dict) else f1.weights["M_gap"]),
-                      float(f2.weights["M_gap"]), rtol=1e-12)
+    assert np.isclose(
+        float(f1["M_gap"] if isinstance(f1, dict) else f1.weights["M_gap"]),
+        float(f2.weights["M_gap"]),
+        rtol=1e-12,
+    )
     vals = np.asarray(q1(np.array([[-2.0, 0.0], [0.0, 0.0], [2.0, 0.0]])))
     assert vals[0] < 0.15 < vals[1] < 0.85 < vals[2]
     assert np.isfinite(float(f1.weights["M_gap"])) and float(f1.weights["M_gap"]) > 0
@@ -316,17 +346,24 @@ def test_cv_refit_runs_end_to_end_and_is_deterministic():
 def test_cv_refit_does_not_leak_into_the_weight_solver():
     """``'cv_refit'`` must be translated to an absolute ridge BEFORE dispatch --
     the weight solver only sees an already-fitted basis and would reject it."""
-    from sliced_committor.core.solver import compute_enriched_basin_moment_weights
     import sliced_committor as sc
+    from sliced_committor.core.solver import compute_enriched_basin_moment_weights
 
     rng = np.random.default_rng(3)
     N = 4000
     X = rng.normal(size=(N, 2)) * 0.6
     X[: N // 2, 0] -= 1.5
-    X[N // 2:, 0] += 1.5
-    res = sc.compute_sliced_committor(X, in_A=X[:, 0] < -1.2, in_B=X[:, 0] > 1.2,
-                                      n_directions=12, seed=0, n_bins=25,
-                                      n_min=10, binning_method="quantile")
+    X[N // 2 :, 0] += 1.5
+    res = sc.compute_sliced_committor(
+        X,
+        in_A=X[:, 0] < -1.2,
+        in_B=X[:, 0] > 1.2,
+        n_directions=12,
+        seed=0,
+        n_bins=25,
+        n_min=10,
+        binning_method="quantile",
+    )
     with pytest.raises(ValueError):
         compute_enriched_basin_moment_weights(res, X, tikhonov="cv_refit")
 
@@ -338,17 +375,24 @@ def test_cv_ridge_is_larger_than_no_ridge_and_changes_the_energy():
     report at least the un-ridged energy.  If ``('ridge_abs', r)`` were dropped
     on the floor the two would agree exactly.
     """
-    from sliced_committor.core.solver import compute_enriched_basin_moment_weights
     import sliced_committor as sc
+    from sliced_committor.core.solver import compute_enriched_basin_moment_weights
 
     rng = np.random.default_rng(1)
     N = 8000
     X = rng.normal(size=(N, 2)) * 0.6
     X[: N // 2, 0] -= 1.5
-    X[N // 2:, 0] += 1.5
-    res = sc.compute_sliced_committor(X, in_A=X[:, 0] < -1.2, in_B=X[:, 0] > 1.2,
-                                      n_directions=24, seed=0, n_bins=40,
-                                      n_min=10, binning_method="quantile")
+    X[N // 2 :, 0] += 1.5
+    res = sc.compute_sliced_committor(
+        X,
+        in_A=X[:, 0] < -1.2,
+        in_B=X[:, 0] > 1.2,
+        n_directions=24,
+        seed=0,
+        n_bins=40,
+        n_min=10,
+        binning_method="quantile",
+    )
     w_cv = compute_enriched_basin_moment_weights(res, X, tikhonov="cv")
     w_0 = compute_enriched_basin_moment_weights(res, X, tikhonov=1e-14)
     assert 1.0 / float(w_cv["M_gap"]) > 1.0 / float(w_0["M_gap"])

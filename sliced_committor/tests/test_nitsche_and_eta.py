@@ -24,7 +24,8 @@ from .test_validation_2d_double_well import _equilibrium_samples
 def fitted():
     samples, in_A, in_B = _equilibrium_samples(n_samples=4000, seed=3)
     result = sc.compute_sliced_committor(
-        samples, in_A=in_A, in_B=in_B, n_directions=48, n_bins=80, seed=1)
+        samples, in_A=in_A, in_B=in_B, n_directions=48, n_bins=80, seed=1
+    )
     return result, np.asarray(samples), np.asarray(in_A), np.asarray(in_B)
 
 
@@ -37,8 +38,8 @@ def test_auto_m_is_linear_in_M_while_auto_is_M_blind():
         vm = jnp.ones(M, bool)
         eta_auto, _ = _resolve_eta("auto", M, vm, N=N)
         eta_m, _ = _resolve_eta("auto_m", M, vm, N=N)
-        assert eta_auto == pytest.approx(1.0 / np.sqrt(N))       # M-blind
-        assert eta_m == pytest.approx(M / N)                     # linear in M
+        assert eta_auto == pytest.approx(1.0 / np.sqrt(N))  # M-blind
+        assert eta_m == pytest.approx(M / N)  # linear in M
     # Doubling M must double the ridge: G sums over directions with no 1/M
     # quadrature weight, so its spectrum scales with M while median(diag G) does
     # not. The exponent is 1, not 1/2 -- see the duplication test in
@@ -70,8 +71,9 @@ def test_lambda_anchors_the_ridge_on_M_times_geomean():
     """
     rng = np.random.default_rng(0)
     M = 256
-    d = np.concatenate([rng.lognormal(0.0, 0.3, M // 2),
-                        rng.lognormal(8.0, 0.3, M // 2)])   # two strata, mean >> median
+    d = np.concatenate(
+        [rng.lognormal(0.0, 0.3, M // 2), rng.lognormal(8.0, 0.3, M // 2)]
+    )  # two strata, mean >> median
     G = jnp.asarray(np.diag(d))
     vm = jnp.ones(M, bool)
     lam = 1e-4
@@ -82,8 +84,8 @@ def test_lambda_anchors_the_ridge_on_M_times_geomean():
     assert eta * med == pytest.approx(lam * M * geo, rel=1e-9)
 
     eta_noG, _ = _resolve_eta(("lambda", lam), M, vm, N=1000)
-    assert eta_noG == pytest.approx(lam * M)                 # documented fallback
-    assert eta != pytest.approx(eta_noG)                     # and they differ here
+    assert eta_noG == pytest.approx(lam * M)  # documented fallback
+    assert eta != pytest.approx(eta_noG)  # and they differ here
 
 
 def test_auto_lambda_scales_as_one_over_N_eff():
@@ -116,13 +118,13 @@ def test_auto_lambda_scales_as_one_over_N_eff():
     e_w, _ = _resolve_eta("auto_lambda", M, vm, sample_weights=jnp.asarray(w), G=G)
     e_n, _ = _resolve_eta("auto_lambda", M, vm, N=n_eff, G=G)
     assert e_w == pytest.approx(e_n, rel=1e-9)
-    assert n_eff < 0.2 * len(w)          # the weights really are concentrated
+    assert n_eff < 0.2 * len(w)  # the weights really are concentrated
 
 
 def test_auto_lambda_refuses_to_guess_N():
     """Silently dropping the 1/N_eff factor would be wrong except at N = 1e5."""
     G = jnp.asarray(np.diag(np.full(16, 2.0)))
-    with pytest.raises(ValueError, match="N_eff|sample_weights or N"):
+    with pytest.raises(ValueError, match=r"N_eff|sample_weights or N"):
         _resolve_eta("auto_lambda", 16, jnp.ones(16, bool), G=G)
 
 
@@ -130,7 +132,7 @@ def test_lambda_ignores_nonpositive_diagonal_entries():
     """Masked-out or numerically zero directions must not sink the geometric mean."""
     M = 64
     d = np.full(M, 4.0)
-    d[:8] = 0.0                                   # e.g. zeroed by the valid mask
+    d[:8] = 0.0  # e.g. zeroed by the valid mask
     G = jnp.asarray(np.diag(d))
     vm = jnp.asarray([False] * 8 + [True] * (M - 8))
     eta, _ = _resolve_eta(("lambda", 1e-3), M, vm, N=1000, G=G)
@@ -166,25 +168,34 @@ def test_duplicated_directions_need_a_proportionally_larger_ridge(fitted):
     no statistics and no reference solution.
     """
     from sliced_committor.core._bmc import compute_basin_moments
+    from sliced_committor.core._bmc_enriched import solve_enriched_basin_moment
     from sliced_committor.core.gram import _assemble_gram_matrix, _compute_derivative_matrix
     from sliced_committor.core.solver import make_weighting_context
-    from sliced_committor.core._bmc_enriched import solve_enriched_basin_moment
 
     result, samples, _, _ = fitted
     ctx = make_weighting_context(result)
     S = ctx.projected_samples
     W = jnp.ones(S.shape[1]) / S.shape[1]
     F = _compute_derivative_matrix(ctx, S)
-    G = np.asarray(_assemble_gram_matrix(
-        F.astype(jnp.float64), W.astype(jnp.float64), ctx.directions @ ctx.directions.T))
+    G = np.asarray(
+        _assemble_gram_matrix(
+            F.astype(jnp.float64), W.astype(jnp.float64), ctx.directions @ ctx.directions.T
+        )
+    )
     a, b = (np.asarray(x) for x in compute_basin_moments(ctx))
     M = G.shape[0]
 
     def solve(Gm, av, bv, eta):
         n = Gm.shape[0]
         out = solve_enriched_basin_moment(
-            jnp.asarray(Gm), jnp.asarray(av), jnp.asarray(bv),
-            jnp.ones(n, bool), eta=eta, N=S.shape[1], raise_on_degenerate=False)
+            jnp.asarray(Gm),
+            jnp.asarray(av),
+            jnp.asarray(bv),
+            jnp.ones(n, bool),
+            eta=eta,
+            N=S.shape[1],
+            raise_on_degenerate=False,
+        )
         return np.asarray(out["w"]), float(out["c"])
 
     eta0 = 1e-2
@@ -193,11 +204,11 @@ def test_duplicated_directions_need_a_proportionally_larger_ridge(fitted):
         idx = np.repeat(np.arange(M), k)
         Gk, ak, bk = G[np.ix_(idx, idx)], a[idx], b[idx]
 
-        wk, ck = solve(Gk, ak, bk, k * eta0)          # scaled ridge: invariant
+        wk, ck = solve(Gk, ak, bk, k * eta0)  # scaled ridge: invariant
         assert np.abs(wk.reshape(M, k).sum(1) - w0).max() < 1e-8 * max(np.abs(w0).max(), 1.0)
         assert abs(ck - c0) < 1e-8 * max(abs(c0), 1.0)
 
-        wb, _ = solve(Gk, ak, bk, eta0)               # fixed ridge: NOT invariant
+        wb, _ = solve(Gk, ak, bk, eta0)  # fixed ridge: NOT invariant
         assert np.abs(wb.reshape(M, k).sum(1) - w0).max() > 1e-6
 
 

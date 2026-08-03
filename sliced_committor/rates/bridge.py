@@ -35,6 +35,7 @@ Key findings baked into the design:
 Reuses: Profile, value_at, density, reactive_flux, cumulative_trapezoid,
 _estimate_D_hummer, _estimate_D_q_stratified, _mfpt_from_profiles, mapped_committor_diffusion.
 """
+
 from __future__ import annotations
 
 from typing import Callable, NamedTuple
@@ -110,8 +111,19 @@ def _silverman_bandwidth(x, w):
     return float(max(0.9 * sd * n_eff ** (-0.2), 1e-3))
 
 
-def conditional_mean(x, y, weights, query, *, method="local_linear", bandwidth=None,
-                     n_knots=25, degree=3, lam=None, min_neff=8.0) -> Regression:
+def conditional_mean(
+    x,
+    y,
+    weights,
+    query,
+    *,
+    method="local_linear",
+    bandwidth=None,
+    n_knots=25,
+    degree=3,
+    lam=None,
+    min_neff=8.0,
+) -> Regression:
     """MBAR-weighted conditional mean E[y|x] at ``query`` (Axis 3 landscape estimator).
 
     method: "hist" | "kernel" (Nadaraya-Watson) | "local_linear" (LOESS deg-1,
@@ -130,8 +142,10 @@ def conditional_mean(x, y, weights, query, *, method="local_linear", bandwidth=N
     if bandwidth is None:
         bandwidth = _silverman_bandwidth(x, w)
     h = float(bandwidth)
-    val = np.full(q.shape, np.nan); slope = np.full(q.shape, np.nan)
-    serr = np.full(q.shape, np.nan); neff = np.zeros(q.shape)
+    val = np.full(q.shape, np.nan)
+    slope = np.full(q.shape, np.nan)
+    serr = np.full(q.shape, np.nan)
+    neff = np.zeros(q.shape)
 
     if method == "hist":
         n = q.shape[0]
@@ -141,12 +155,15 @@ def conditional_mean(x, y, weights, query, *, method="local_linear", bandwidth=N
             m = idx == i
             if not np.any(m):
                 continue
-            wi = w[m]; sw = wi.sum()
+            wi = w[m]
+            sw = wi.sum()
             if sw <= 0:
                 continue
             neff[i] = (sw * sw) / max((wi * wi).sum(), _TINY)
             val[i] = float(np.average(y[m], weights=wi))
-            serr[i] = float(np.sqrt(np.average((y[m] - val[i]) ** 2, weights=wi) / max(neff[i], 1.0)))
+            serr[i] = float(
+                np.sqrt(np.average((y[m] - val[i]) ** 2, weights=wi) / max(neff[i], 1.0))
+            )
         return Regression(val, slope, serr, neff)
 
     for i, x0 in enumerate(q):
@@ -161,11 +178,15 @@ def conditional_mean(x, y, weights, query, *, method="local_linear", bandwidth=N
             val[i] = float((k * y).sum() / sk)
         elif method == "local_linear":
             dx = x - x0
-            Sw = sk; Swx = float((k * dx).sum()); Swxx = float((k * dx * dx).sum())
-            Swy = float((k * y).sum()); Swxy = float((k * dx * y).sum())
+            Sw = sk
+            Swx = float((k * dx).sum())
+            Swxx = float((k * dx * dx).sum())
+            Swy = float((k * y).sum())
+            Swxy = float((k * dx * y).sum())
             det = Sw * Swxx - Swx * Swx
             if abs(det) <= _TINY * (Sw * Swxx + _TINY):
-                val[i] = Swy / Sw; slope[i] = 0.0
+                val[i] = Swy / Sw
+                slope[i] = 0.0
             else:
                 val[i] = (Swxx * Swy - Swx * Swxy) / det
                 slope[i] = (Sw * Swxy - Swx * Swy) / det
@@ -194,9 +215,9 @@ def _pspline_regression(x, y, w, query, *, n_knots, degree, lam, order=2) -> Reg
     if lam is None:
         n = x.shape[0]
         best, best_c = np.inf, None
-        for l in np.logspace(-6, 3, 24):
-            c = np.linalg.solve(A0 + l * P, rhs)
-            tr = float(np.trace(np.linalg.solve(A0 + l * P, A0)))
+        for lam_try in np.logspace(-6, 3, 24):
+            c = np.linalg.solve(A0 + lam_try * P, rhs)
+            tr = float(np.trace(np.linalg.solve(A0 + lam_try * P, A0)))
             rss = float(np.sum(W * (y - B @ c) ** 2)) * n
             gcv = rss / max((1.0 - tr / n) ** 2, 1e-12)
             if gcv < best:
@@ -205,8 +226,12 @@ def _pspline_regression(x, y, w, query, *, n_knots, degree, lam, order=2) -> Reg
     else:
         c = np.linalg.solve(A0 + float(lam) * P, rhs)
     spl = BSpline(t, c, degree)
-    return Regression(np.asarray(Bq @ c), np.asarray(spl.derivative()(np.clip(query, lo, hi))),
-                      np.full(query.shape, np.nan), np.full(query.shape, np.nan))
+    return Regression(
+        np.asarray(Bq @ c),
+        np.asarray(spl.derivative()(np.clip(query, lo, hi))),
+        np.full(query.shape, np.nan),
+        np.full(query.shape, np.nan),
+    )
 
 
 # ===========================================================================
@@ -214,9 +239,15 @@ def _pspline_regression(x, y, w, query, *, n_knots, degree, lam, order=2) -> Reg
 # ===========================================================================
 def hummer_Ds_profile(s_values, window_ids, dt, *, min_count=5):
     """Per-window Hummer D_s(s) profile (memory-integrated, rate-relevant). Returns (s, D_s)."""
-    prof = _estimate_D_hummer(np.asarray(s_values, float), np.asarray(window_ids).reshape(-1),
-                              float(dt), int(min_count), "cv")
-    sc = np.asarray(prof.levels, float); dv = np.asarray(prof.values, float)
+    prof = _estimate_D_hummer(
+        np.asarray(s_values, float),
+        np.asarray(window_ids).reshape(-1),
+        float(dt),
+        int(min_count),
+        "cv",
+    )
+    sc = np.asarray(prof.levels, float)
+    dv = np.asarray(prof.values, float)
     o = np.argsort(sc)
     return sc[o], dv[o]
 
@@ -224,7 +255,8 @@ def hummer_Ds_profile(s_values, window_ids, dt, *, min_count=5):
 def Ds_interpolator(s_centers, D_s):
     """Linear interpolator of a D_s(s) profile over finite positive points."""
     good = np.isfinite(s_centers) & np.isfinite(D_s) & (D_s > 0)
-    sc = np.asarray(s_centers)[good]; dv = np.asarray(D_s)[good]
+    sc = np.asarray(s_centers)[good]
+    dv = np.asarray(D_s)[good]
 
     def fn(s_query):
         return np.interp(np.asarray(s_query, float), sc, dv, left=dv[0], right=dv[-1])
@@ -234,11 +266,18 @@ def Ds_interpolator(s_centers, D_s):
 
 def smooth_Ds_profile(s_centers, D_s, query, *, counts=None, method="local_linear", bandwidth=None):
     """Smooth the sparse per-window D_s(s) into a profile at ``query`` (log-space regression)."""
-    s_centers = np.asarray(s_centers, float); D_s = np.asarray(D_s, float)
+    s_centers = np.asarray(s_centers, float)
+    D_s = np.asarray(D_s, float)
     good = np.isfinite(s_centers) & np.isfinite(D_s) & (D_s > 0)
     w = None if counts is None else np.asarray(counts, float)[good]
-    reg = conditional_mean(s_centers[good], np.log(D_s[good]), w, np.asarray(query, float),
-                           method=method, bandwidth=bandwidth)
+    reg = conditional_mean(
+        s_centers[good],
+        np.log(D_s[good]),
+        w,
+        np.asarray(query, float),
+        method=method,
+        bandwidth=bandwidth,
+    )
     return np.exp(reg.value)
 
 
@@ -248,12 +287,17 @@ def smooth_Ds_profile(s_centers, D_s, query, *, counts=None, method="local_linea
 def _profile(grid, values, counts=None):
     if counts is None:
         counts = np.full(np.asarray(grid).shape, 100, dtype=np.int64)
-    return Profile(levels=np.asarray(grid, float), values=np.asarray(values, float),
-                   counts=np.asarray(counts), name="committor")
+    return Profile(
+        levels=np.asarray(grid, float),
+        values=np.asarray(values, float),
+        counts=np.asarray(counts),
+        name="committor",
+    )
 
 
-def committor_grad_profile(committor, samples, *, sample_weights=None, n_bins=200,
-                           method="local_linear", bandwidth=None):
+def committor_grad_profile(
+    committor, samples, *, sample_weights=None, n_bins=200, method="local_linear", bandwidth=None
+):
     """E[|grad q|^2 | q] on the [0,1] grid by regression (Axis 3; replaces Phi/pi)."""
     qx, gsq = committor_values_and_grad_sq(committor, samples)
     edges = np.linspace(0.0, 1.0, n_bins + 1)
@@ -262,9 +306,19 @@ def committor_grad_profile(committor, samples, *, sample_weights=None, n_bins=20
     return _profile(grid, reg.value), reg
 
 
-def mapped_committor_diffusion_field(committor, samples, *, D_s_profile, cv_grad_sq, s_values,
-                                     sample_weights=None, n_bins=200, method="local_linear",
-                                     bandwidth=None, at=None):
+def mapped_committor_diffusion_field(
+    committor,
+    samples,
+    *,
+    D_s_profile,
+    cv_grad_sq,
+    s_values,
+    sample_weights=None,
+    n_bins=200,
+    method="local_linear",
+    bandwidth=None,
+    at=None,
+):
     """Position-dependent-D0 bridge: D_q(q) = E[ D0(s(x)) * |grad q|^2 | q ].
 
     D0(s) = D_s(s)/cv_grad_sq, with ``D_s_profile`` a ``(s_centers, D_s)`` pair (e.g.
@@ -286,8 +340,17 @@ def mapped_committor_diffusion_field(committor, samples, *, D_s_profile, cv_grad
     return prof if at is None else value_at(prof, at)
 
 
-def mapped_committor_diffusion_reparam(committor, samples, *, D_s_profile, s_values,
-                                       sample_weights=None, n_bins=200, bandwidth=None, at=None):
+def mapped_committor_diffusion_reparam(
+    committor,
+    samples,
+    *,
+    D_s_profile,
+    s_values,
+    sample_weights=None,
+    n_bins=200,
+    bandwidth=None,
+    at=None,
+):
     """Deterministic-reparametrisation bridge: D_q(q) = D_s(s(q)) * (dq/ds)^2.
 
     Uses the empirical monotone map s(q)=E[s|q] and slope ds/dq from a local-linear
@@ -301,8 +364,9 @@ def mapped_committor_diffusion_reparam(committor, samples, *, D_s_profile, s_val
     s_values = np.asarray(s_values, float)
     edges = np.linspace(0.0, 1.0, n_bins + 1)
     grid = 0.5 * (edges[:-1] + edges[1:])
-    reg = conditional_mean(qx, s_values, sample_weights, grid, method="local_linear",
-                           bandwidth=bandwidth)
+    reg = conditional_mean(
+        qx, s_values, sample_weights, grid, method="local_linear", bandwidth=bandwidth
+    )
     D_q = np.asarray(Ds_fn(reg.value), float) / np.maximum(reg.slope**2, _TINY)
     D_q = np.where(np.isfinite(D_q) & (reg.slope**2 > 1e-12), D_q, np.nan)
     prof = _profile(grid, D_q)
@@ -313,12 +377,15 @@ def mapped_committor_diffusion_reparam(committor, samples, *, D_s_profile, s_val
 
 
 def _weighted_r2(x, y, w):
-    x = np.asarray(x, float); y = np.asarray(y, float)
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
     w = np.ones_like(x) if w is None else np.asarray(w, float)
     w = w / max(w.sum(), _TINY)
-    xb = float((w * x).sum()); yb = float((w * y).sum())
+    xb = float((w * x).sum())
+    yb = float((w * y).sum())
     cov = float((w * (x - xb) * (y - yb)).sum())
-    vx = float((w * (x - xb) ** 2).sum()); vy = float((w * (y - yb) ** 2).sum())
+    vx = float((w * (x - xb) ** 2).sum())
+    vy = float((w * (y - yb) ** 2).sum())
     return float(cov * cov / max(vx * vy, _TINY))
 
 
@@ -344,13 +411,19 @@ def flux_reductions(grid, pi, D_q, rho_A, rho_B, *, band=(0.3, 0.7), stderr_logf
     """
     from .formulas import _mfpt_from_profiles
 
-    grid = np.asarray(grid, float); pi = np.asarray(pi, float); D_q = np.asarray(D_q, float)
+    grid = np.asarray(grid, float)
+    pi = np.asarray(pi, float)
+    D_q = np.asarray(D_q, float)
     dq = float(grid[1] - grid[0])
     nu = D_q * pi
     finite = np.isfinite(nu) & (nu > 0) & (pi > 0) & np.isfinite(D_q) & (D_q > 0)
 
     def to_k(v):
-        return {"nu": float(v), "k_AB": float(v) / max(rho_A, _TINY), "k_BA": float(v) / max(rho_B, _TINY)}
+        return {
+            "nu": float(v),
+            "k_AB": float(v) / max(rho_A, _TINY),
+            "k_BA": float(v) / max(rho_B, _TINY),
+        }
 
     nu_arith = float(np.sum(np.where(finite, nu, 0.0)) * dq)
     lo, hi = band
@@ -371,12 +444,17 @@ def flux_reductions(grid, pi, D_q, rho_A, rho_B, *, band=(0.3, 0.7), stderr_logf
         nu_mle, cv = float("nan"), float("nan")
 
     mfpt_AB, mfpt_BA = _mfpt_from_profiles(grid, pi, np.where(finite, D_q, np.nan), None)
-    k_harm_AB = 1.0 / max(mfpt_AB, _TINY); k_harm_BA = 1.0 / max(mfpt_BA, _TINY)
+    k_harm_AB = 1.0 / max(mfpt_AB, _TINY)
+    k_harm_BA = 1.0 / max(mfpt_BA, _TINY)
     return {
-        "arithmetic": to_k(nu_arith), "plateau_median": to_k(nu_plateau),
-        "local": to_k(nu_local), "const_flux_mle": to_k(nu_mle),
+        "arithmetic": to_k(nu_arith),
+        "plateau_median": to_k(nu_plateau),
+        "local": to_k(nu_local),
+        "const_flux_mle": to_k(nu_mle),
         "harmonic": {"k_AB": k_harm_AB, "k_BA": k_harm_BA, "mfpt_AB": mfpt_AB, "mfpt_BA": mfpt_BA},
-        "flux_cv": cv, "bracket_k_AB": (k_harm_AB, nu_arith / max(rho_A, _TINY)), "nu_profile": nu,
+        "flux_cv": cv,
+        "bracket_k_AB": (k_harm_AB, nu_arith / max(rho_A, _TINY)),
+        "nu_profile": nu,
     }
 
 
@@ -389,8 +467,18 @@ def constancy_reconstruction(grid, pi, nu_R):
 # ===========================================================================
 # Uncertainty: window block bootstrap of the barrier D_s
 # ===========================================================================
-def bootstrap_barrier_Ds(qx, cv_values, sample_weights, window_ids, dt, *, band=(0.3, 0.7),
-                         n_boot=1000, seed=0, min_count=5):
+def bootstrap_barrier_Ds(
+    qx,
+    cv_values,
+    sample_weights,
+    window_ids,
+    dt,
+    *,
+    band=(0.3, 0.7),
+    n_boot=1000,
+    seed=0,
+    min_count=5,
+):
     """Window block bootstrap of the barrier-band Hummer D_s (statistical rate CI).
 
     The scalar bridge rate is linear in D_s, so k_boot/k_hat = D_s_boot/D_s_hat.
@@ -398,8 +486,10 @@ def bootstrap_barrier_Ds(qx, cv_values, sample_weights, window_ids, dt, *, band=
     """
     from ..workflows.committor_rates import _hummer_cv_barrier_scalar
 
-    qx = np.asarray(qx, float); cvp = np.asarray(cv_values, float)
-    w = np.asarray(sample_weights, float); wid = np.asarray(window_ids).reshape(-1)
+    qx = np.asarray(qx, float)
+    cvp = np.asarray(cv_values, float)
+    w = np.asarray(sample_weights, float)
+    wid = np.asarray(window_ids).reshape(-1)
     uw = np.unique(wid)
     idx_by_w = {k: np.where(wid == k)[0] for k in uw}
     D_hat = _hummer_cv_barrier_scalar(qx, cvp, w, wid, dt, min_count=min_count)
@@ -419,8 +509,20 @@ def bootstrap_barrier_Ds(qx, cv_values, sample_weights, window_ids, dt, *, band=
 # ===========================================================================
 # Bayesian Smoluchowski (F, D) diagnostic  (LOCAL D; a CV-memory cross-check)
 # ===========================================================================
-def bayesian_smoluchowski_diffusion(s_values, window_ids, window_centers, window_kappa, beta, dt, *,
-                                    n_bins=25, lag=5, max_iter=300, smooth_logD=0.5, smooth_F=0.1):
+def bayesian_smoluchowski_diffusion(
+    s_values,
+    window_ids,
+    window_centers,
+    window_kappa,
+    beta,
+    dt,
+    *,
+    n_bins=25,
+    lag=5,
+    max_iter=300,
+    smooth_logD=0.5,
+    smooth_F=0.1,
+):
     """ML Smoluchowski-propagator (F(s), D(s)) inference (Hummer 2005), a LOCAL-D diagnostic.
 
     Fits each biased window's lag-``lag`` transition matrix as expm(dt*lag*R_w) with a
@@ -432,12 +534,16 @@ def bayesian_smoluchowski_diffusion(s_values, window_ids, window_centers, window
     from jax.scipy.linalg import expm
     from scipy.optimize import minimize
 
-    s = np.asarray(s_values, float); wid = np.asarray(window_ids).reshape(-1)
-    c_w = np.asarray(window_centers, float).reshape(-1); k_w = np.asarray(window_kappa, float).reshape(-1)
-    L = int(lag); tau = float(dt) * L
+    s = np.asarray(s_values, float)
+    wid = np.asarray(window_ids).reshape(-1)
+    c_w = np.asarray(window_centers, float).reshape(-1)
+    k_w = np.asarray(window_kappa, float).reshape(-1)
+    L = int(lag)
+    tau = float(dt) * L
     lo, hi = float(np.min(s)), float(np.max(s))
     edges = np.linspace(lo, hi, n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:]); dx = float(centers[1] - centers[0])
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    dx = float(centers[1] - centers[0])
     uw = np.unique(wid)
     counts = np.zeros((len(uw), n_bins, n_bins))
     for wi, wv in enumerate(uw):
@@ -447,21 +553,30 @@ def bayesian_smoluchowski_diffusion(s_values, window_ids, window_centers, window
         bi = np.clip(np.digitize(xi, edges) - 1, 0, n_bins - 1)
         np.add.at(counts[wi], (bi[L:], bi[:-L]), 1.0)
     counts_j = jnp.asarray(counts)
-    c_w_j = jnp.asarray(np.resize(c_w, len(uw))); k_w_j = jnp.asarray(np.resize(k_w, len(uw)))
+    c_w_j = jnp.asarray(np.resize(c_w, len(uw)))
+    k_w_j = jnp.asarray(np.resize(k_w, len(uw)))
     cen_j = jnp.asarray(centers)
-    hist = np.maximum(np.bincount(np.clip(np.digitize(s, edges) - 1, 0, n_bins - 1), minlength=n_bins), 1.0)
-    F0 = -np.log(hist / hist.sum()); F0 -= F0.min()
+    hist = np.maximum(
+        np.bincount(np.clip(np.digitize(s, edges) - 1, 0, n_bins - 1), minlength=n_bins), 1.0
+    )
+    F0 = -np.log(hist / hist.sum())
+    F0 -= F0.min()
     theta0 = np.concatenate([F0, np.full(n_bins - 1, np.log(max(np.var(s) / max(L, 1), 1e-6)))])
 
     def build_R(F_w, logD):
-        D_edge = jnp.exp(logD); dF = F_w[1:] - F_w[:-1]
-        up = D_edge / dx**2 * jnp.exp(-0.5 * dF); dn = D_edge / dx**2 * jnp.exp(0.5 * dF)
-        R = jnp.zeros((n_bins, n_bins)); idx = jnp.arange(n_bins - 1)
-        R = R.at[idx + 1, idx].set(up); R = R.at[idx, idx + 1].set(dn)
+        D_edge = jnp.exp(logD)
+        dF = F_w[1:] - F_w[:-1]
+        up = D_edge / dx**2 * jnp.exp(-0.5 * dF)
+        dn = D_edge / dx**2 * jnp.exp(0.5 * dF)
+        R = jnp.zeros((n_bins, n_bins))
+        idx = jnp.arange(n_bins - 1)
+        R = R.at[idx + 1, idx].set(up)
+        R = R.at[idx, idx + 1].set(dn)
         return R - jnp.diag(jnp.sum(R, axis=0))
 
     def neg_ll(theta):
-        F = theta[:n_bins]; logD = theta[n_bins:]
+        F = theta[:n_bins]
+        logD = theta[n_bins:]
 
         def one(wi):
             F_w = F + 0.5 * beta * k_w_j[wi] * (cen_j - c_w_j[wi]) ** 2
@@ -469,7 +584,9 @@ def bayesian_smoluchowski_diffusion(s_values, window_ids, window_centers, window
             return jnp.sum(counts_j[wi] * jnp.log(T))
 
         ll = jnp.sum(jax.vmap(one)(jnp.arange(counts_j.shape[0])))
-        pen = smooth_logD * jnp.sum(jnp.diff(logD, 2) ** 2) + smooth_F * jnp.sum(jnp.diff(F, 2) ** 2)
+        pen = smooth_logD * jnp.sum(jnp.diff(logD, 2) ** 2) + smooth_F * jnp.sum(
+            jnp.diff(F, 2) ** 2
+        )
         return -ll + pen
 
     vg = jax.jit(jax.value_and_grad(neg_ll))
@@ -480,4 +597,8 @@ def bayesian_smoluchowski_diffusion(s_values, window_ids, window_centers, window
 
     res = minimize(f, theta0, jac=True, method="L-BFGS-B", options={"maxiter": int(max_iter)})
     D_edge = np.exp(np.asarray(res.x[n_bins:]))
-    return 0.5 * (centers[:-1] + centers[1:]), D_edge, {"success": bool(res.success), "nll": float(res.fun)}
+    return (
+        0.5 * (centers[:-1] + centers[1:]),
+        D_edge,
+        {"success": bool(res.success), "nll": float(res.fun)},
+    )
