@@ -325,7 +325,7 @@ def _value_at_safe(profile, level) -> float:
         return float("nan")
 
 
-def _cv_feature_grad_sq(cvp, features, weights) -> float:
+def _cv_feature_grad_sq(cvp, features, weights, metric=None) -> float:
     """``<|grad s|^2>`` of the umbrella CV in the feature space (M0 = I).
 
     Fits ``s ~ a.x + b`` by the MBAR-weighted, lightly-ridged least squares so the
@@ -345,25 +345,34 @@ def _cv_feature_grad_sq(cvp, features, weights) -> float:
     A = Xc.T @ (w[:, None] * Xc)
     lam = 1e-6 * (float(np.trace(A)) / max(d, 1) + 1e-30)
     coef = np.linalg.solve(A + lam * np.eye(d), Xc.T @ (w * sc))
-    return float(coef @ coef)
+    if metric is None:
+        return float(coef @ coef)
+    M = np.asarray(metric, dtype=float)
+    return float(coef @ (M * coef if M.ndim == 1 else M @ coef))
 
 
 def _mapped_committor_diffusion_profile(
-    q, feats, cvp, features, weights, *, D_s, n_bins, mapped_fn
+    q, feats, cvp, features, weights, *, D_s, n_bins, mapped_fn, metric=None
 ):
     """Committor-coordinate diffusion ``D_q(q)`` MAPPED from the umbrella-CV ``D_s``.
 
     Returns a :class:`Profile` (or ``None`` when ``D_s`` / the CV gradient is not
     usable). See :func:`sliced_committor.mapped_committor_diffusion`.
+
+    ``metric`` is applied to BOTH mean-squared gradients: the committor's co-area
+    numerator and the CV's denominator. Applying it to one only would silently
+    rescale every rate, since ``D_q`` is exactly linear in the numerator and
+    inverse-linear in the denominator.
     """
     if not (np.isfinite(D_s) and D_s > 0):
         return None
     try:
-        g_s = _cv_feature_grad_sq(cvp, features, weights)
+        g_s = _cv_feature_grad_sq(cvp, features, weights, metric=metric)
         if not (np.isfinite(g_s) and g_s > 0):
             return None
         return mapped_fn(
-            q, feats, D_s=float(D_s), cv_grad_sq=g_s, sample_weights=weights, n_bins=n_bins
+            q, feats, D_s=float(D_s), cv_grad_sq=g_s, sample_weights=weights,
+            n_bins=n_bins, metric=metric,
         )
     except Exception as exc:
         logger.warning("CV-mapped diffusion profile failed: %s", exc)
@@ -384,6 +393,7 @@ def fit_and_rate(
     n_diff_bins: int = 25,
     solver_kwargs: dict | None = None,
     weight_kwargs: dict | None = None,
+    bridge_metric=None,
     committor_sweep_grid: dict | str | None = "auto",
     committor_select_by: str = "dirichlet",
     scatter_n: int = 4000,
@@ -690,6 +700,7 @@ def fit_and_rate(
         D_s=D_s_hummer,
         n_bins=rate_nbins,
         mapped_fn=mapped_committor_diffusion,
+        metric=bridge_metric,
     )
     if mapped_Dq is not None:
         try:

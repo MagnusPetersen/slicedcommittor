@@ -73,6 +73,8 @@ from .gram import (
     _assemble_gram_matrix,
     _compute_derivative_matrix,
     compute_shared_gram_diagnostics,
+    resolve_cos_matrix,
+    resolve_metric_diagonal,
 )
 from .solver import _interp_1d_at_samples
 from .weights import _mask_and_regularize_gram, _resolve_eta
@@ -212,6 +214,268 @@ def solve_enriched_basin_moment(
 
 
 # ---------------------------------------------------------------------------
+# Halfset-eigen Gram regularization (tikhonov='halfset_eigen')
+# ---------------------------------------------------------------------------
+#
+# Vendored from ``lib/recovar/regularize.py`` (``halfset_eigen_regularize``,
+# with the fold recombination of ``halfset_grams_from_arrays`` and the solve
+# convention of ``solve_with_G``) so that ``lib/sliced_committor`` stays
+# self-contained; this package must not import ``lib/recovar``. Validation
+# and provenance: ``docs/recovar_transfers.md`` (EXP-A and the Composition
+# experiments).
+
+_HALFSET_N_FOLDS = 10
+_HALFSET_N_BANDS = 12
+
+
+def _halfset_ssnr_from_corr(c):
+    """FSC to SSNR of the combined (full) dataset: SSNR = 2c/(1-c)."""
+    c = np.clip(c, 0.0, 0.999999)
+    return 2.0 * c / (1.0 - c)
+
+
+def _halfset_eigen_regularize(G1, G2, n_bands=_HALFSET_N_BANDS):
+    """Wiener ridge in eigen-bands of Gbar = (G1 + G2)/2.
+
+    Split the frames in two halves, assemble a Gram matrix from each, and
+    read the sampling noise off their DISAGREEMENT band by band, exactly as
+    cryoEM FSC reads the noise off two half-map reconstructions. The SSNR of
+    band k comes from the correlation of the band rows of ``V'G1V`` against
+    ``V'G2V`` (the halfset Grams expressed in the eigenbasis of their
+    average) via the FSC identity ``SSNR = 2c/(1-c)``; each eigenvalue is
+    then inflated as ``lam_reg = max(lam, 0) * (1 + 1/SSNR)``, so the
+    INVERSE the solve uses is damped by the Wiener factor
+    ``SSNR/(1+SSNR)``. PSD by construction (floor ``1e-12 * max lam_reg``);
+    no tuned constant anywhere.
+
+    Vendored verbatim (numerics unchanged, including the ``scipy.linalg.eigh``
+    driver) from ``lib/recovar/regularize.py``; see that module and
+    ``docs/recovar_transfers.md`` for the validated lesson that the sampling
+    noise of G is diagonal in the EIGENBASIS of G, not in any a-priori
+    slice-property basis.
+
+    Returns ``(G_reg, info)`` with ``info = dict(band_ssnr, lam, lam_reg)``.
+    """
+    from scipy.linalg import eigh
+
+    G1 = np.asarray(G1, dtype=np.float64)
+    G2 = np.asarray(G2, dtype=np.float64)
+    M = G1.shape[0]
+    Gbar = 0.5 * (G1 + G2)
+    lam, V = eigh(Gbar)
+    order = np.argsort(-lam)
+    lam, V = lam[order], V[:, order]
+    A1 = V.T @ G1 @ V
+    A2 = V.T @ G2 @ V
+
+    edges = np.linspace(0, M, n_bands + 1).astype(int)
+    ssnr = np.zeros(M)
+    band_ssnr = np.zeros(n_bands)
+    for k in range(n_bands):
+        sl = slice(edges[k], edges[k + 1])
+        v1 = A1[sl, :].ravel()
+        v2 = A2[sl, :].ravel()
+        if v1.size < 3 or v1.std() == 0 or v2.std() == 0:
+            s = 1e6
+        else:
+            s = _halfset_ssnr_from_corr(np.corrcoef(v1, v2)[0, 1])
+        band_ssnr[k] = s
+        ssnr[sl] = s
+    lam_reg = np.maximum(lam, 0.0) * (1.0 + 1.0 / np.maximum(ssnr, 1e-12))
+    floor = 1e-12 * max(lam_reg.max(), 1e-300)
+    lam_reg = np.maximum(lam_reg, floor)
+    G_reg = (V * lam_reg) @ V.T
+    return G_reg, dict(band_ssnr=band_ssnr, lam=lam, lam_reg=lam_reg)
+
+
+def heldout_cap_halfset(G_folds, w_folds, a_folds, b_folds, wA, wB, valid_mask):
+    """Held-out Dirichlet cap evaluated with the half-set solve itself.
+
+    The cap of Eq. (cap), ``E[u] / F[u]^2``, bounds ``nu_AB`` for whatever trial
+    space produced it, so it ranks direction sets on the same variational
+    footing the weights already obey and no reference committor enters it. To
+    rank trial spaces rather than fit them it has to be read out of sample, and
+    to rank the trial spaces that are actually deployed it has to be read
+    through the solve that is actually deployed.
+
+    For each fold ``k`` the remaining folds are the training set. Their even and
+    odd halves give the two half-Grams the regulariser reads the sampling noise
+    off, the constrained solve of Eq. (wstar) runs on the regularised training
+    Gram, and the cap
+
+        w' G_k w / ((b_k - a_k) . w)^2
+
+    is evaluated on the fold that was held out. Both factors are out of sample,
+    which is what makes the number comparable across different trial spaces;
+    the in-sample Dirichlet energy is monotone in M by construction and cannot
+    rank them.
+
+    There is no ridge grid here, because the half-set filter has no scalar to
+    select. The return value is therefore one number per trial space, which is
+    what a model-selection criterion needs.
+
+    Two asymmetries against the deployed fit are worth naming, because both are
+    inherent to reading a criterion out of sample and neither disturbs a
+    ranking. Each training set is ``K-1`` folds rather than the whole sample, so
+    its half-Grams are noisier and the filter damps a little harder than it will
+    at deployment. And with ``K`` even the ``K-1`` training folds split
+    ``K/2`` against ``K/2 - 1``, so the two halves are not exactly equal in
+    weight. Both effects are common to every trial space compared, so they shift
+    the level of the cap and not the order of it.
+
+    Returns ``dict`` with ``cap`` (the fold mean), ``per_fold``, ``se``,
+    ``n_folds`` and ``n_ok``.
+    """
+    G_folds = np.asarray(G_folds, np.float64)
+    w_folds = np.asarray(w_folds, np.float64)
+    a_folds = np.asarray(a_folds, np.float64)
+    b_folds = np.asarray(b_folds, np.float64)
+    wA = np.asarray(wA, np.float64)
+    wB = np.asarray(wB, np.float64)
+    keep = np.asarray(valid_mask, bool)
+    K = G_folds.shape[0]
+    caps = np.full(K, np.nan)
+
+    for k in range(K):
+        other = np.array([j for j in range(K) if j != k])
+        # A fold that holds no samples of some basin cannot define the moment
+        # gap, on either side of the split.
+        if wA[k] <= 0 or wB[k] <= 0:
+            continue
+        if wA[other].sum() <= 0 or wB[other].sum() <= 0:
+            continue
+        even, odd = other[0::2], other[1::2]
+        if even.size == 0 or odd.size == 0:
+            continue
+
+        wo = w_folds[other]
+        Gtr = np.tensordot(wo, G_folds[other], axes=(0, 0)) / max(wo.sum(), 1e-300)
+        atr = (wA[other] @ a_folds[other]) / max(wA[other].sum(), 1e-300)
+        btr = (wB[other] @ b_folds[other]) / max(wB[other].sum(), 1e-300)
+        # The half-set split is taken over the TRAINING folds only, so the
+        # regulariser never sees the fold the cap is read on.
+        G1 = (np.tensordot(w_folds[even], G_folds[even], axes=(0, 0))
+              / max(w_folds[even].sum(), 1e-300))
+        G2 = (np.tensordot(w_folds[odd], G_folds[odd], axes=(0, 0))
+              / max(w_folds[odd].sum(), 1e-300))
+        try:
+            res = _solve_halfset_eigen(
+                Gtr, atr, btr, keep, G1, G2, raise_on_degenerate=False)
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+        w = np.asarray(res["w"], np.float64)
+        gap = float((b_folds[k] - a_folds[k]) @ w)
+        if abs(gap) > 1e-30:
+            caps[k] = float(w @ G_folds[k] @ w) / gap ** 2
+
+    n_ok = int(np.isfinite(caps).sum())
+    if n_ok == 0:
+        raise ValueError("heldout_cap_halfset: the cap is undefined on every fold.")
+    with np.errstate(invalid="ignore"):
+        mean = float(np.nanmean(caps))
+        se = float(np.nanstd(caps, ddof=1) / np.sqrt(n_ok)) if n_ok > 1 else float("nan")
+    return dict(cap=mean, per_fold=caps, se=se, n_folds=int(K), n_ok=n_ok)
+
+
+def _solve_halfset_eigen(
+    G,
+    a,
+    b,
+    valid_mask,
+    G1,
+    G2,
+    raise_on_degenerate=True,
+    cond_enriched_threshold=1e-6,
+):
+    """Closed-form EBMC solve on the halfset-eigen regularized Gram.
+
+    Restricts the two half-Grams to the valid directions BEFORE the
+    eigendecomposition (masked rows are zero, and their zero eigenvalues
+    would poison the low eigen-bands' SSNR), regularizes with
+    :func:`_halfset_eigen_regularize`, and solves with ZERO additional
+    Tikhonov ridge; ``G_reg`` already carries its own PSD floor. The solve
+    mirrors ``lib/recovar/regularize.py`` ``solve_with_G`` (Cholesky with an
+    lstsq fallback) on the valid sub-block, then embeds back to the full
+    direction set with identity rows for invalid directions, matching the
+    mask contract of ``_mask_and_regularize_gram``.
+
+    Returns the key set of :func:`solve_enriched_basin_moment` (with
+    ``eta_used = 0.0``) plus ``'halfset_info'``, the raw regularizer info
+    dict for the caller's diagnostics block.
+    """
+    from scipy.linalg import cho_factor, cho_solve
+
+    valid = np.asarray(valid_mask, bool)
+    iv = np.flatnonzero(valid)
+    M = int(np.asarray(G).shape[0])
+    G1v = np.asarray(G1, np.float64)[np.ix_(iv, iv)]
+    G2v = np.asarray(G2, np.float64)[np.ix_(iv, iv)]
+    G_reg_v, info = _halfset_eigen_regularize(G1v, G2v, n_bands=_HALFSET_N_BANDS)
+
+    a_np = np.asarray(a, np.float64)
+    b_np = np.asarray(b, np.float64)
+    av, bv = a_np[iv], b_np[iv]
+    delta = bv - av
+    cond_chol = float("inf")
+    try:
+        cf = cho_factor(G_reg_v, lower=True)
+        w_dual = cho_solve(cf, delta)
+        Ginv_a = cho_solve(cf, av)
+        Ginv_b = cho_solve(cf, bv)
+        L_abs = np.abs(np.diag(cf[0]))
+        cond_chol = float((L_abs.max() / max(L_abs.min(), 1e-30)) ** 2)
+    except np.linalg.LinAlgError:
+        w_dual = np.linalg.lstsq(G_reg_v, delta, rcond=None)[0]
+        Ginv_a = np.linalg.lstsq(G_reg_v, av, rcond=None)[0]
+        Ginv_b = np.linalg.lstsq(G_reg_v, bv, rcond=None)[0]
+
+    A_s = float(av @ Ginv_a)
+    B_s = float(bv @ Ginv_b)
+    C_s = float(av @ Ginv_b)
+    M_gap = float(delta @ w_dual)
+    Delta = A_s * B_s - C_s * C_s
+
+    w_v = w_dual / M_gap if abs(M_gap) > 1e-300 else w_dual
+    c = float(-(av @ w_v))
+    w = np.zeros(M)
+    w[iv] = w_v
+
+    scale = max(A_s, B_s, 1e-30)
+    cond_enriched = M_gap / scale
+    if raise_on_degenerate and cond_enriched < cond_enriched_threshold:
+        raise EnrichedBMCRepresentationError(
+            f"cond_enriched={cond_enriched:.3g} < {cond_enriched_threshold:.3g}: "
+            "moment gap (b−a) is collapsing in G⁻¹ norm; the projection basis "
+            "cannot distinguish A from B at the moment level. Add more or "
+            "differently-aligned directions. Set raise_on_degenerate=False "
+            "to override."
+        )
+
+    G_reg_full = np.eye(M)
+    G_reg_full[np.ix_(iv, iv)] = G_reg_v
+
+    improvement = 1.0 + (A_s - C_s) ** 2 / Delta if Delta > 1e-14 else float("nan")
+    return {
+        "w": jnp.asarray(w),
+        "c": c,
+        "a": a,
+        "b": b,
+        "M_gap": M_gap,
+        "A": A_s,
+        "B": B_s,
+        "C": C_s,
+        "Delta": Delta,
+        "improvement_over_bmc": improvement,
+        "cond_enriched": float(cond_enriched),
+        "condition_number": cond_chol,
+        "G_reg": jnp.asarray(G_reg_full),
+        "eta_used": 0.0,
+        "N_eff": None,
+        "halfset_info": info,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
 
@@ -229,7 +493,9 @@ def _add_ebmc_diagnostics(result, G, a, b, valid_mask, ctx=None):
       * ``sum_w``: reported but not constrained.
       * ``optimal_dirichlet_energy``: ``1 / M_gap``.
     """
-    compute_shared_gram_diagnostics(result, G, valid_mask, ctx=ctx)
+    compute_shared_gram_diagnostics(
+        result, G, valid_mask, ctx=ctx, metric_diag=resolve_metric_diagonal(ctx)
+    )
     w = result["w"]
     c = result["c"]
 
@@ -254,6 +520,7 @@ def enriched_basin_moment_weights(
     raise_on_degenerate: bool = True,
     cond_enriched_threshold: float = 1e-6,
     gram_dtype: str = "float64",
+    heldout_cap: bool = False,
 ) -> dict:
     """Top-level basic EBMC solver.
 
@@ -278,9 +545,19 @@ def enriched_basin_moment_weights(
             carries no fitted constant, and is what the paper's figures use; it
             costs one extra assembly-equivalent (the folds partition the
             samples) plus K eigendecompositions, so it is opt-in rather than the
-            default. Also accepts a float or ``'auto_lambda'``. ``'cv'`` is
+            default. ``'halfset_eigen'`` regularises the Gram matrix itself
+            instead of selecting a scalar ridge: two interleaved contiguous
+            basin-stratified half-Grams (10 folds) measure the per-eigenband
+            SSNR of G and a Wiener factor damps each band; the solve then runs
+            with zero additional ridge. Tuning-free; costs one extra
+            assembly-equivalent plus one eigendecomposition. Frames must be
+            TIME-ORDERED, the same contract as ``'cv'`` (the contiguous
+            stratified folds assume serial order within each stratum; on
+            shuffled frames the measured SSNR is optimistic). Validated in
+            ``docs/recovar_transfers.md`` (EXP-A). Also accepts a float or
+            ``'auto_lambda'``. ``'cv'`` and ``'halfset_eigen'`` are
             implemented here and *only* here -- the full-Gram, plain-BMC, PESB
-            and Nitsche solvers do not accept it. See ``docs/ridge_rule.md``.
+            and Nitsche solvers do not accept them. See ``docs/ridge_rule.md``.
         raise_on_degenerate, cond_enriched_threshold: see
             :func:`solve_enriched_basin_moment`.
         gram_dtype: dtype for the dominant ``(M, N)×(N, M)`` inner product.
@@ -290,7 +567,14 @@ def enriched_basin_moment_weights(
         dict: output of :func:`solve_enriched_basin_moment` augmented with
         the assembled ``G``, the basin moments ``a``, ``b``, zero
         ``q_bar``, and shared Gram + EBMC-specific diagnostics.
-    """
+            heldout_cap: with ``tikhonov='halfset_eigen'``, additionally evaluate
+            the held-out Dirichlet cap under that same solve and return it as
+            ``result['heldout_cap']``. This is the quantity that ranks trial
+            spaces (direction sets, M) without a reference committor; see
+            :func:`heldout_cap_halfset`. Off by default because it costs the
+            per-fold basin moments and K small solves, which a plain fit does
+            not need.
+"""
     if not jax.config.read("jax_enable_x64"):
         raise ValueError(
             "EBMC requires jax_enable_x64=True. "
@@ -328,16 +612,18 @@ def enriched_basin_moment_weights(
     W = sample_weights if sample_weights is not None else jnp.ones(N) / N
 
     F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+    cos_matrix = resolve_cos_matrix(ctx)
     matmul_dtype = jnp.dtype(gram_dtype)
     F_lo = F.astype(matmul_dtype)
     W_lo = W.astype(matmul_dtype)
     G = _assemble_gram_matrix(F_lo, W_lo, cos_matrix)
     want_cv = isinstance(tikhonov, str) and tikhonov == "cv"
-    if not want_cv:
-        # tikhonov='cv' needs F again for the per-fold Gram blocks; every other
-        # setting is done with it here, and at villin's M = 2048 the (M, N)
-        # buffer is 3.3 GB, so keep the early free as the default path.
+    want_halfset = isinstance(tikhonov, str) and tikhonov == "halfset_eigen"
+    if not (want_cv or want_halfset):
+        # tikhonov='cv' and 'halfset_eigen' need F again for the per-fold Gram
+        # blocks; every other setting is done with it here, and at villin's
+        # M = 2048 the (M, N) buffer is 3.3 GB, so keep the early free as the
+        # default path.
         del F, F_lo, W_lo
 
     a, b = compute_basin_moments(moments_ctx)
@@ -349,17 +635,20 @@ def enriched_basin_moment_weights(
     # answer and cross-validating it is meaningless, not merely expensive.
     # Fall back rather than raise: a ladder that sweeps M upward from 1 is a
     # legitimate caller and should not have to special-case its first rung.
-    if want_cv:
+    if want_cv or want_halfset:
         n_valid = int(np.asarray(ctx.valid_mask, bool).sum())
         if n_valid < 2:
             logger.warning(
-                "tikhonov='cv': only %d valid direction(s); the moment constraint "
-                "already determines w, so the ridge is immaterial. Falling back "
-                "to 'auto'.",
+                "tikhonov=%r: only %d valid direction(s); the moment constraint "
+                "already determines w, so the regularisation is immaterial. "
+                "Falling back to 'auto'.",
+                tikhonov,
                 n_valid,
             )
             want_cv = False
+            want_halfset = False
             tikhonov = "auto"
+            del F, F_lo, W_lo
     if want_cv:
         # Calibration-free ridge: minimise the HELD-OUT cap, 1-SE rule.  Costs one
         # extra assembly-equivalent (the folds partition the samples) plus K
@@ -383,19 +672,79 @@ def enriched_basin_moment_weights(
         tikhonov = ("ridge_abs", cv_info["ridge"])
         del G_folds, a_folds, b_folds, F, F_lo, W_lo
 
-    result = solve_enriched_basin_moment(
-        G,
-        a,
-        b,
-        ctx.valid_mask,
-        eta=tikhonov,
-        sample_weights=sample_weights,
-        N=N,
-        raise_on_degenerate=raise_on_degenerate,
-        cond_enriched_threshold=cond_enriched_threshold,
-    )
+    halfset_info = None
+    heldout_cap_info = None
+    if want_halfset:
+        # Halfset-eigen Gram regularization (the RECOVAR sec. 1 transfer,
+        # validated in docs/recovar_transfers.md EXP-A). The fold
+        # recombination matches recovar.halfset_grams_from_arrays: each fold
+        # block is normalised by its own weight sum, so the weighted mean of
+        # the even (odd) fold blocks IS the even (odd) half-Gram, and
+        # interleaving contiguous stratified blocks between the halves is
+        # what keeps the halfset disagreement honest on serially correlated
+        # frames.
+        from ._ridge_cv import fold_basin_moments, fold_gram_blocks, make_folds
+
+        strata = np.where(np.asarray(ctx.in_A, bool), 0, np.where(np.asarray(ctx.in_B, bool), 1, 2))
+        fold_of = make_folds(N, _HALFSET_N_FOLDS, contiguous=True, strata=strata)
+        G_folds, w_folds = fold_gram_blocks(F, W, cos_matrix, fold_of, _HALFSET_N_FOLDS)
+        del F, F_lo, W_lo
+        even = np.arange(0, _HALFSET_N_FOLDS, 2)
+        odd = np.arange(1, _HALFSET_N_FOLDS, 2)
+        G1 = np.tensordot(w_folds[even], G_folds[even], axes=(0, 0)) / w_folds[even].sum()
+        G2 = np.tensordot(w_folds[odd], G_folds[odd], axes=(0, 0)) / w_folds[odd].sum()
+        # The held-out cap under this same solve, for ranking trial spaces. The
+        # fold Gram blocks are already assembled above, so the only extra cost
+        # is the basin moments per fold and K small solves.
+        if heldout_cap:
+            a_folds, b_folds, wA_f, wB_f = fold_basin_moments(
+                moments_ctx, fold_of, _HALFSET_N_FOLDS)
+            heldout_cap_info = heldout_cap_halfset(
+                G_folds, w_folds, a_folds, b_folds, wA_f, wB_f, ctx.valid_mask)
+            del a_folds, b_folds
+        del G_folds
+
+        result = _solve_halfset_eigen(
+            G,
+            a,
+            b,
+            ctx.valid_mask,
+            G1,
+            G2,
+            raise_on_degenerate=raise_on_degenerate,
+            cond_enriched_threshold=cond_enriched_threshold,
+        )
+        halfset_info = result.pop("halfset_info")
+    else:
+        result = solve_enriched_basin_moment(
+            G,
+            a,
+            b,
+            ctx.valid_mask,
+            eta=tikhonov,
+            sample_weights=sample_weights,
+            N=N,
+            raise_on_degenerate=raise_on_degenerate,
+            cond_enriched_threshold=cond_enriched_threshold,
+        )
     result["G"] = G
     result["q_bar"] = jnp.zeros_like(result["w"])
+    if heldout_cap_info is not None:
+        result["heldout_cap"] = {
+            "cap": heldout_cap_info["cap"],
+            "se": heldout_cap_info["se"],
+            "n_folds": heldout_cap_info["n_folds"],
+            "n_ok": heldout_cap_info["n_ok"],
+            "per_fold": np.asarray(heldout_cap_info["per_fold"]),
+        }
+    if halfset_info is not None:
+        result["halfset_eigen"] = {
+            "n_folds": _HALFSET_N_FOLDS,
+            "n_bands": _HALFSET_N_BANDS,
+            "band_ssnr": [float(s) for s in halfset_info["band_ssnr"]],
+            "lam_max": float(np.max(halfset_info["lam"])),
+            "lam_min_reg": float(np.min(halfset_info["lam_reg"])),
+        }
     if cv_info is not None:
         result["ridge_cv"] = {
             k: cv_info[k] for k in ("ridge", "anchor", "idx", "idx_argmin", "at_edge", "n_folds")
@@ -646,7 +995,7 @@ def enriched_basin_moment_weights_power(
     )
     Fprime = _compute_derivative_matrix(ctx, projected_samples)
 
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+    cos_matrix = resolve_cos_matrix(ctx)
     matmul_dtype = jnp.dtype(gram_dtype)
     F_aug = _build_augmented_field_smoothstep(
         Q,

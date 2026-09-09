@@ -433,15 +433,38 @@ def _resolve_D(D, levels):
     return np.full(levels.shape[0], float(D))
 
 
-def _coarea_contributions(committor, samples, D, sample_weights):
+def _grad_sq(grads, metric):
+    """``|∇q|²`` or the metric-weighted ``∇qᵀ M ∇q``.
+
+    ``metric=None`` returns the ORIGINAL expression verbatim, not an equivalent
+    one: routing it through an einsum with an identity would change the float64
+    reduction order, and the published tolerances would pass while the plateau
+    flux silently drifted.
+    """
+    if metric is None:
+        return jnp.sum(grads**2, axis=-1)
+    M = jnp.asarray(metric)
+    if M.ndim == 1:
+        return jnp.sum((grads**2) * M[None, :], axis=-1)
+    if M.ndim == 2:
+        return jnp.einsum("nd,de,ne->n", grads, M, grads)
+    raise ValueError(f"metric must be None, (d,) diagonal or (d, d); got ndim {M.ndim}")
+
+
+def _coarea_contributions(committor, samples, D, sample_weights, *, metric=None):
     """Per-sample co-area contributions ``W_n · D(q_n) · |∇q̄(x_n)|²`` and levels.
 
     One vmapped ``value_and_grad`` pass yields both the committor value and its
     gradient at each sample (instead of a separate value pass + gradient pass).
+
+    ``metric`` replaces ``|∇q|²`` by ``∇qᵀ M ∇q``. Whatever is passed here MUST
+    also be used for the CV denominator that ``mapped_committor_diffusion``
+    divides by -- the map is only bias-free when both mean-squared gradients are
+    taken in the SAME metric.
     """
     samples_j = jnp.asarray(samples)
     vals, grads = jax.vmap(jax.value_and_grad(committor))(samples_j)
-    g = np.asarray(jnp.sum(grads**2, axis=-1), dtype=np.float64)
+    g = np.asarray(_grad_sq(grads, metric), dtype=np.float64)
     levels = np.clip(np.asarray(vals, dtype=np.float64), 0.0, 1.0)
     W = normalize_weights(sample_weights, levels.shape[0])
     D_n = _resolve_D(D, levels)
@@ -474,7 +497,8 @@ def _plateau_flux(levels, contrib, lo, hi):
     return float(np.sum(contrib[mask]) / (hi - lo))
 
 
-def reactive_flux(committor, samples, *, D, at=None, sample_weights=None, n_bins=200):
+def reactive_flux(committor, samples, *, D, at=None, sample_weights=None, n_bins=200,
+                  metric=None):
     """TPT reactive flux Φ through iso-committor surfaces.
 
     ``Φ(q*) = ∫_{q̄=q*} π D |∇q̄| dS`` is constant in q* for the true committor
@@ -494,7 +518,8 @@ def reactive_flux(committor, samples, *, D, at=None, sample_weights=None, n_bins
     Returns:
         :class:`Profile` if ``at is None``, else a float.
     """
-    levels, contrib = _coarea_contributions(committor, samples, D, sample_weights)
+    levels, contrib = _coarea_contributions(
+        committor, samples, D, sample_weights, metric=metric)
     centers, Phi, counts = _coarea_profile(levels, contrib, n_bins)
     prof = Profile(levels=centers, values=Phi, counts=counts, name="committor")
     if at is None:
@@ -662,6 +687,7 @@ def mapped_committor_diffusion(
     sample_weights=None,
     n_bins=200,
     at=None,
+    metric=None,
 ):
     """Committor-space diffusion D_q(q) MAPPED from the umbrella-CV diffusion D_s.
 
@@ -693,9 +719,16 @@ def mapped_committor_diffusion(
         samples: ``(N, dim)`` static ensemble (for the co-area gradient + pi).
         D_s: the configurational-scale diffusion measured along the umbrella CV
             (e.g. the barrier-band Hummer value), in (CV-units)^2 / time.
-        cv_grad_sq: the CV's mean squared gradient ``<|grad s|^2>`` (M0=I) in the
-            SAME (slicing/feature) space as the committor gradient -- a scalar. The
-            single scalar ``D0 = D_s / cv_grad_sq`` sets the whole physical scale.
+        cv_grad_sq: the CV's mean squared gradient ``<|grad s|^2>`` in the SAME
+            (slicing/feature) space as the committor gradient, and -- crucially --
+            in the SAME METRIC. The single scalar ``D0 = D_s / cv_grad_sq`` sets
+            the whole physical scale.
+        metric: None (the published ``M0 = I``), a ``(d,)`` diagonal, or a
+            ``(d, d)`` tensor, replacing ``<|grad q|^2>`` by
+            ``<grad q^T M grad q>``. It is the CALLER's responsibility to pass a
+            ``cv_grad_sq`` computed in the same metric; mixing metrics between the
+            numerator and the denominator is dimensionally incoherent and silently
+            rescales every rate.
         sample_weights: ``(N,)`` optional MBAR/WHAM weights.
         n_bins: committor-coordinate resolution of the returned profile.
         at: ``None`` -> the full :class:`Profile` of D_q(q); else value(s) at the
@@ -711,7 +744,8 @@ def mapped_committor_diffusion(
         raise ValueError(f"D_s must be finite and positive; got {D_s!r}")
     pi_prof = density(committor, samples, sample_weights=sample_weights, n_bins=n_bins)
     Phi1 = reactive_flux(
-        committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins
+        committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins,
+        metric=metric,
     )
     pi = np.asarray(pi_prof.values, dtype=np.float64)
     # <|grad q|^2>(q) = Phi_{D=1}(q) / pi(q) (co-area identity).

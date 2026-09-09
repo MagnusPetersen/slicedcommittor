@@ -78,8 +78,21 @@ def cv_values_and_grad_sq(cv_fn: Callable, samples, *, metric=None):
     return np.asarray(vals, dtype=np.float64), np.asarray(jnp.sum(g2, axis=-1), dtype=np.float64)
 
 
-def cv_feature_grad_sq_linear(cv_values, features, weights) -> float:
-    """Ridge linear-response <|grad s|^2> = |a|^2 with s ~ a.x (the library default)."""
+def cv_feature_grad_sq_linear(cv_values, features, weights, metric=None) -> float:
+    """LEGACY ridge linear-response ``<|grad s|^2> = a^T M a`` with ``s ~ a.x``.
+
+    This is the denominator the PUBLISHED rates use, and it is NOT a mean squared
+    gradient: ``a`` is a best-linear-predictor coefficient, so the value depends on
+    the fitting window rather than on the field. Measured on the pooled chignolin
+    data (630,063 frames, 86-D torsions): the global fit gives 0.222 while
+    per-umbrella-window fits give 0.0066 -- a 33x swing that a genuine pointwise
+    average cannot produce. Kept because it reproduces the published numbers; use
+    :func:`mapped_committor_diffusion_reparam` for a bridge that needs no gradient
+    of ``s`` at all.
+
+    ``metric`` (None | ``(d,)`` | ``(d, d)``) must match whatever the committor
+    numerator used, so the two mean-squared gradients live in one metric.
+    """
     X = np.asarray(features, dtype=np.float64)
     s = np.asarray(cv_values, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
@@ -91,7 +104,10 @@ def cv_feature_grad_sq_linear(cv_values, features, weights) -> float:
     A = Xc.T @ (w[:, None] * Xc)
     lam = 1e-6 * (float(np.trace(A)) / max(d, 1) + 1e-30)
     coef = np.linalg.solve(A + lam * np.eye(d), Xc.T @ (w * sc))
-    return float(coef @ coef)
+    if metric is None:
+        return float(coef @ coef)
+    M = np.asarray(metric, dtype=np.float64)
+    return float(coef @ (M * coef if M.ndim == 1 else M @ coef))
 
 
 # ===========================================================================

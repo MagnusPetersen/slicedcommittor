@@ -124,6 +124,7 @@ indent-style = "space"
 minversion = "7.4"
 testpaths = ["sliced_committor/tests"]
 addopts = "-ra --strict-markers"
+markers = ["slow: marks tests as slow (> 10s)"]
 filterwarnings = [
     "ignore::DeprecationWarning:jax.*",
 ]

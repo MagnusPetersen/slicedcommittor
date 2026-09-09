@@ -38,6 +38,7 @@ from .solver import (
     compute_sliced_committor,
     compute_weights_multi,
 )
+from .gram import metric_diagonal
 from .weights import corrected_dirichlet_inv_rd
 
 Weights = jnp.ndarray | dict
@@ -311,6 +312,11 @@ def committor_dirichlet_energy(
     contributes = jnp.isfinite(log_D) & (w_eff != 0)
     safe_log_D = jnp.where(contributes, log_D, 0.0)
     term = jnp.where(contributes, (w_eff**2) * jnp.exp(safe_log_D), 0.0)
+    # Under a feature-space metric the per-slice energy is d_j INT rho (dq/ds)^2.
+    # The Gram branch above gets this from G; the diagonal fallback must add it.
+    d_j = metric_diagonal(result.directions, result.feature_metric)
+    if d_j is not None:
+        term = term * d_j
     return float(jnp.sum(term))
 
 
@@ -356,7 +362,7 @@ def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs, weig
         RIDGE_LO,
         make_folds,
     )
-    from .gram import _assemble_gram_matrix, _compute_derivative_matrix
+    from .gram import _assemble_gram_matrix, _compute_derivative_matrix, resolve_cos_matrix
     from .solver import make_weighting_context
 
     X = np.asarray(samples)
@@ -376,7 +382,7 @@ def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs, weig
             sample_weights=None,
         )
         F = _compute_derivative_matrix(sub, proj)
-        cos = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+        cos = resolve_cos_matrix(ctx)
         G = _assemble_gram_matrix(F.astype(jnp.float64), jnp.full(len(idx), 1.0 / len(idx)), cos)
         a, b = compute_basin_moments(sub)
         return np.asarray(G, np.float64), np.asarray(a), np.asarray(b)

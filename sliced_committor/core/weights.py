@@ -49,6 +49,8 @@ from ._internal import to_log_abs_sign
 from .gram import (
     _compute_derivative_matrix,
     compute_shared_gram_diagnostics,
+    resolve_cos_matrix,
+    resolve_metric_diagonal,
 )
 from .solver import _interp_1d_at_samples
 
@@ -95,14 +97,23 @@ def _sample_weights_match(a, b):
 
 
 @jit
-def _compute_corrected_weights(log_D, epsilon, valid_mask):
+def _compute_corrected_weights(log_D, epsilon, valid_mask, log_metric_diag=None):
     """Fused: log((1-eps)+) - log(D) -> softmax -> normalised weights.
 
     Standard formula w ~ (1-eps)/D.
+
+    ``log_metric_diag`` is ``log d_j`` with ``d_j = theta_j^T Mbar theta_j``: under
+    a feature-space metric the per-slice Dirichlet energy is
+    ``d_j INT rho (dq_j/ds)^2``, so ``d_j`` divides out of the weight exactly as
+    ``D_j`` does. None (the default) leaves the published behaviour untouched --
+    note this is gated on the METRIC being absent, not on it equalling I, so a
+    caller passing non-unit directions keeps its historical weights.
     """
     correction = jnp.maximum(1.0 - epsilon, 0.0)
     log_correction = jnp.where(correction > 0, jnp.log(correction), -jnp.inf)
     log_weights = log_correction - log_D
+    if log_metric_diag is not None:
+        log_weights = log_weights - log_metric_diag
     log_weights = jnp.where(valid_mask, log_weights, -jnp.inf)
     return jax.nn.softmax(log_weights)
 
@@ -499,7 +510,9 @@ def corrected_dirichlet_inv_rd(ctx):
             "not pre-computed. Use compute_sliced_committor()."
         )
 
-    return _compute_corrected_weights(log_D, epsilon, ctx.valid_mask)
+    d_j = resolve_metric_diagonal(ctx)
+    log_d = None if d_j is None else jnp.log(jnp.maximum(d_j, 1e-300))
+    return _compute_corrected_weights(log_D, epsilon, ctx.valid_mask, log_d)
 
 
 # ===========================================================================
@@ -1079,6 +1092,7 @@ def _add_gram_diagnostics(result, G, b, valid_mask, ctx=None):
         G,
         valid_mask,
         ctx=ctx,
+        metric_diag=resolve_metric_diagonal(ctx),
     )
     if D_matched_norm is None:
         result["R_M_ratio"] = float("nan")
@@ -1185,7 +1199,7 @@ def full_gram_weights(
     # upcasting the (M, M) result is a near-free 1.7–2× speedup on CPU and
     # much more on TF32-capable GPUs.
     F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+    cos_matrix = resolve_cos_matrix(ctx)
     matmul_dtype = jnp.dtype(gram_dtype)
     F_lo = F.astype(matmul_dtype)
     W_lo = W.astype(matmul_dtype)

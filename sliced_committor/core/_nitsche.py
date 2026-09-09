@@ -73,7 +73,7 @@ import jax
 import jax.numpy as jnp
 
 from ._bmc import compute_basin_moments
-from .gram import _assemble_gram_matrix, _compute_derivative_matrix
+from .gram import _assemble_gram_matrix, _compute_derivative_matrix, resolve_cos_matrix
 from .weights import _resolve_eta
 
 logger = logging.getLogger(__name__)
@@ -300,7 +300,7 @@ def nitsche_weights(
     W = sample_weights if sample_weights is not None else jnp.ones(N) / N
 
     F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+    cos_matrix = resolve_cos_matrix(ctx)
     matmul_dtype = jnp.dtype(gram_dtype)
     G = _assemble_gram_matrix(F.astype(matmul_dtype), W.astype(matmul_dtype), cos_matrix)
     del F
