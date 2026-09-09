@@ -60,7 +60,7 @@ class RepresentationError(RuntimeError):
 class Weights(NamedTuple):
     """The solved weights and what the solve knows about them.
 
-    Fields:
+    Attributes:
         w: ``(M,)`` slice weights (zero on invalid directions).
         c: the global bias ``-a^T w``.
         dirichlet_energy: ``w^T G w`` on the UNregularised Gram: the variational

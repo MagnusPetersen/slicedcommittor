@@ -1,445 +1,80 @@
-"""Quantity primitives along the committor (or a collective variable):
+"""Static-ensemble quantities, and the two routes to a committor-space diffusion.
 
-* :func:`diffusion_coefficient` -- position-dependent diffusion D(level) from a
-  trajectory via the drift-corrected Kramers-Moyal estimator.
-* :func:`density` -- equilibrium density π(level) from a static ensemble.
-* :func:`reactive_flux` -- TPT reactive flux Φ(q*) through an iso-committor
-  surface, from the committor gradient.
+* :func:`density`: the equilibrium density of a coordinate, reweightable.
+* :func:`basin_populations`: ``rho_A = E[1 - q]``, ``rho_B = E[q]``.
+* :func:`committor_grad_sq`: the iso-committor mean squared gradient
+  ``<grad q^T M grad q | q>`` by the co-area identity, one autodiff pass.
+* :func:`committor_diffusion_from_cv`: the Jacobian map of a diffusion measured
+  along a collective variable into committor space, the paper's route.
+* :func:`linear_response_grad_sq`: the collective variable's mean squared
+  gradient that the map divides by, with its caveat.
+* :func:`committor_diffusion_from_cv_reparam`: the same map through the
+  empirical monotone relation ``s(q)``, needing no gradient of ``s``.
 
-Each takes the callable committor ``q`` (from ``build_committor`` /
-``fit_committor``) plus its data, and returns a :class:`Profile` (when
-``at=None``) or the value(s) at the requested committor level(s) / range.
-Diffusion and density accept ``coordinate=`` (per-sample CV values) to profile
-along an arbitrary collective variable; flux is committor-specific.
+Only :func:`committor_grad_sq` takes the committor function (it differentiates
+it); everything else takes per-sample values.
 """
-
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.stats import rankdata
 
-from ._coordinate import _LAG_CANDIDATES, Profile, _is_range, coordinate_levels, value_at
+from ._coordinate import Profile
 from ._numerics import density_histogram, normalize_weights
 
-# =============================================================================
-# Density
-# =============================================================================
+_TINY = 1e-30
 
 
-def density(committor, samples, *, at=None, sample_weights=None, n_bins=200, coordinate=None):
-    """Equilibrium density π along the committor (or a CV).
-
-    Args:
-        committor: callable ``q(x)`` from :func:`build_committor`/:func:`fit_committor`.
-        samples: ``(N, dim)`` static equilibrium ensemble.
-        at: ``None`` returns the full :class:`Profile`; a scalar/array returns
-            π at that committor level(s); a ``(lo, hi)`` tuple returns the mean.
-        sample_weights: ``(N,)`` optional MBAR weights (reweights π to target).
-        n_bins: histogram resolution along the coordinate.
-        coordinate: ``None`` (committor) or a ``(N,)`` per-sample CV array.
-
-    Returns:
-        :class:`Profile` if ``at is None``, else a float / array.
-    """
-    levels, span, name = coordinate_levels(committor, samples, coordinate)
-    edges = np.linspace(span[0], span[1], n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    pi, counts = density_histogram(levels, edges, sample_weights)
-    prof = Profile(levels=centers, values=pi, counts=counts, name=name)
-    return prof if at is None else value_at(prof, at)
-
-
-# =============================================================================
-# Diffusion (drift-corrected Kramers-Moyal)
-# =============================================================================
-
-
-def _estimate_D_q_lumped(levels_t, bin_idx, lag, dt, n_bins, min_count):
-    """Drift-corrected KM D(level) at one lag; single contiguous trajectory."""
-    T = levels_t.shape[0]
-    if lag >= T:
-        return np.array([]), np.array([])
-    dq = levels_t[lag:] - levels_t[:-lag]
-    bins = bin_idx[:-lag]
-    counts = np.bincount(bins, minlength=n_bins)
-    counts_safe = np.maximum(counts, 1)
-    mean_dq = np.bincount(bins, weights=dq, minlength=n_bins) / counts_safe
-    mean_dq2 = np.bincount(bins, weights=dq * dq, minlength=n_bins) / counts_safe
-    D_values = (mean_dq2 - mean_dq**2) / (2.0 * lag * dt)
-    return np.where(counts >= min_count, D_values, np.nan), counts
-
-
-def _estimate_D_q_stratified(levels_t, bin_idx, window_ids, lag, dt, n_bins, min_count):
-    """Window-stratified drift-corrected KM D(level) (umbrella-sampling data).
-
-    Pairs are kept only within a single window; per-(window, bin) variances are
-    pooled with a Bessel correction, removing inter-window drift contamination.
-    """
-    T = levels_t.shape[0]
-    if lag >= T:
-        return np.array([]), np.array([])
-    wid = np.asarray(window_ids).reshape(-1)
-    if wid.shape[0] != T:
-        raise ValueError(f"window_ids length {wid.shape[0]} != trajectory length {T}")
-    same = wid[:-lag] == wid[lag:]
-    if not np.any(same):
-        return np.full(n_bins, np.nan), np.zeros(n_bins, dtype=np.int64)
-    dq = (levels_t[lag:] - levels_t[:-lag])[same]
-    bins = bin_idx[:-lag][same]
-    wins = wid[:-lag][same]
-    _, win_compact = np.unique(wins, return_inverse=True)
-    K = int(win_compact.max()) + 1
-    flat = win_compact * n_bins + bins
-    n_kb = np.bincount(flat, minlength=K * n_bins)
-    sum_dq = np.bincount(flat, weights=dq, minlength=K * n_bins)
-    sum_dq2 = np.bincount(flat, weights=dq * dq, minlength=K * n_bins)
-    n_safe = np.maximum(n_kb, 1)
-    mean_kb = sum_dq / n_safe
-    pop_var = np.where(n_kb >= 1, sum_dq2 / n_safe - mean_kb**2, 0.0)
-    multi = n_kb >= 2
-    num = np.where(multi, n_kb * pop_var, 0.0).reshape(K, n_bins)
-    den = np.where(multi, n_kb - 1, 0).reshape(K, n_bins)
-    total = n_kb.reshape(K, n_bins).sum(axis=0)
-    pool_num = num.sum(axis=0)
-    pool_den = den.sum(axis=0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        pooled = np.where(pool_den > 0, pool_num / np.maximum(pool_den, 1), np.nan)
-    D_values = pooled / (2.0 * lag * dt)
-    D_values = np.where(total >= min_count, D_values, np.nan)
-    return D_values, total.astype(np.int64)
-
-
-def _tau_int_geyer_frames(x):
-    """Integrated autocorrelation time of ``x`` in FRAMES via Geyer's
-    initial-positive-sequence estimator.
-
-    Returns ``tau = 0.5 + sum of positive autocorrelation PAIRS`` (the
-    trapezoidal ``int rho(t) dt`` with the ``rho_0 = 1`` endpoint counted at
-    half weight), so the Hummer diffusion ``D = var(x) / (tau * dt)`` recovers
-    ``var / int_0^inf rho dt`` for a locally Ornstein-Uhlenbeck coordinate.
-    Pairing consecutive lags and stopping at the first non-positive pair tames
-    the noise tail that makes a single-lag estimate fragile.
-    """
-    x = np.asarray(x, dtype=np.float64)
-    n = x.shape[0]
-    x = x - x.mean()
-    c0 = float(np.dot(x, x) / n)
-    if not np.isfinite(c0) or c0 <= 0.0:
-        return 0.5
-    max_lag = min(n // 4, 1000)
-    if max_lag < 1:
-        return 0.5
-    rho = np.array(
-        [float(np.dot(x[: n - k], x[k:]) / ((n - k) * c0)) for k in range(1, max_lag + 1)]
-    )
-    s = 0.0
-    for k in range(0, rho.shape[0] - 1, 2):
-        pair = rho[k] + rho[k + 1]
-        if not np.isfinite(pair) or pair <= 0.0:
-            break
-        s += pair
-    return max(0.5 + s, 0.5)
-
-
-def _estimate_D_hummer(levels_t, window_ids, dt, min_count, name):
-    """Hummer/Kramers per-window diffusion ``D_k = var(level_k) / (tau_int_k dt)``.
-
-    For a coordinate that is locally CONFINED within each window (umbrella
-    sampling, or short restrained/swarm segments), the equilibrium variance and
-    the integrated autocorrelation time give the effective diffusion directly --
-    a LAG-ROBUST estimate that needs no lag scan. One D per window, placed at the
-    window's mean coordinate value, so the result is a (coarse) D(level) profile
-    consumable by the same machinery as the Kramers-Moyal estimator.
-    """
-    wid = np.asarray(window_ids).reshape(-1)
-    levels_t = np.asarray(levels_t, dtype=np.float64)
-    centers, D_vals, counts = [], [], []
-    for k in np.unique(wid):
-        x = levels_t[wid == k]
-        if x.shape[0] < max(int(min_count), 4):
-            continue
-        var = float(np.var(x))
-        if not np.isfinite(var) or var <= 0.0:
-            continue
-        D = var / (_tau_int_geyer_frames(x) * dt)
-        if not np.isfinite(D) or D <= 0.0:
-            continue
-        centers.append(float(np.mean(x)))
-        D_vals.append(D)
-        counts.append(x.shape[0])
-    if not centers:
-        raise RuntimeError(
-            "diffusion_coefficient(method='hummer'): no window had enough confined "
-            "samples for a var/tau_int estimate (raise min_count windows or check window_ids)"
-        )
-    order = np.argsort(centers)
-    return Profile(
-        levels=np.asarray(centers)[order],
-        values=np.asarray(D_vals)[order],
-        counts=np.asarray(counts, dtype=np.int64)[order],
-        name=name,
-    )
-
-
-def _estimate_D_km_per_window(levels_t, window_ids, lag, dt, min_count, name):
-    """Per-window drift-corrected Kramers-Moyal diffusion (one D per window).
-
-    Within each window k (frames assumed time-ordered and contiguous) the
-    short-lag displacement variance gives the LOCAL short-time diffusion
-
-        D_k = (<ds^2> - <ds>^2) / (2 lag dt),   ds = level[t+lag] - level[t]
-
-    using only within-window consecutive pairs (no cross-window drift). It is
-    the per-window analogue of the coordinate-binned Kramers-Moyal estimator
-    and the direct short-time counterpart of the Hummer per-window estimator
-    (:func:`_estimate_D_hummer`): one D placed at the window's mean coordinate
-    value, so both estimators yield a (coarse) D(level) profile with one point
-    per window on the same footing. ``lag`` defaults to 1 (the diffusive
-    short-time limit); ``np.var`` subtracts the mean displacement, so the drift
-    induced by the umbrella restraint is removed.
-    """
-    wid = np.asarray(window_ids).reshape(-1)
-    levels_t = np.asarray(levels_t, dtype=np.float64)
-    L = max(int(lag), 1)
-    centers, D_vals, counts = [], [], []
-    for k in np.unique(wid):
-        x = levels_t[wid == k]
-        if x.shape[0] < max(int(min_count), L + 2):
-            continue
-        ds = x[L:] - x[:-L]
-        var = float(np.var(ds))  # drift-corrected: var subtracts <ds>
-        D = var / (2.0 * L * dt)
-        if not np.isfinite(D) or D <= 0.0:
-            continue
-        centers.append(float(np.mean(x)))
-        D_vals.append(D)
-        counts.append(x.shape[0])
-    if not centers:
-        raise RuntimeError(
-            "diffusion_coefficient(per_window=True, method='kramers_moyal'): no "
-            "window had enough samples for a within-window short-lag variance "
-            "(raise min_count or check window_ids)."
-        )
-    order = np.argsort(centers)
-    return Profile(
-        levels=np.asarray(centers)[order],
-        values=np.asarray(D_vals)[order],
-        counts=np.asarray(counts, dtype=np.int64)[order],
-        name=name,
-    )
-
-
-def _barrier_band_median(D_values, counts, centers, span):
-    """Count-weighted median of D over the central 60% of the coordinate span."""
-    lo = span[0] + 0.2 * (span[1] - span[0])
-    hi = span[0] + 0.8 * (span[1] - span[0])
-    mask = (centers >= lo) & (centers <= hi) & np.isfinite(D_values) & (counts > 0)
-    if not np.any(mask):
-        finite = np.isfinite(D_values)
-        return float(np.nanmedian(D_values[finite])) if np.any(finite) else float("nan")
-    vals = D_values[mask]
-    w = counts[mask].astype(np.float64)
-    order = np.argsort(vals)
-    cum = np.cumsum(w[order])
-    if cum[-1] <= 0:
-        return float(np.nanmedian(vals))
-    idx = min(int(np.searchsorted(cum, 0.5 * cum[-1])), vals.shape[0] - 1)
-    return float(vals[order][idx])
-
-
-def _pick_D_peak(summaries):
-    arr = np.asarray(summaries, dtype=np.float64)
-    finite = np.isfinite(arr) & (arr > 0)
-    if not np.any(finite):
-        return 0
-    return int(np.argmax(np.where(finite, arr, -np.inf)))
-
-
-def diffusion_coefficient(
-    committor,
-    trajectory,
-    *,
-    dt,
-    at=None,
-    coordinate=None,
-    lag=None,
-    lag_candidates=_LAG_CANDIDATES,
-    window_ids=None,
-    n_bins=200,
-    min_count=5,
-    method="kramers_moyal",
-    per_window=False,
-):
-    """Position-dependent diffusion D along the committor (or a CV).
+# ---------------------------------------------------------------------------
+# density and populations
+# ---------------------------------------------------------------------------
+def density(coordinate, *, sample_weights=None, n_bins=200, span=(0.0, 1.0)) -> Profile:
+    """Equilibrium density of a coordinate, integrating to one over ``span``.
 
     Args:
-        committor: callable ``q(x)``.
-        trajectory: ``(T, dim)`` TIME-ORDERED frames at spacing ``dt``.
-        dt: time between consecutive frames.
-        at: ``None`` -> :class:`Profile`; scalar/array -> D at level(s);
-            ``(lo, hi)`` -> mean over the range.
-        coordinate: ``None`` (committor) or a ``(T,)`` per-frame CV array.
-        lag: fixed lag (in frames); when ``None``, scan ``lag_candidates`` and
-            pick the lag whose barrier-band D is largest (the diffusive peak).
-            (``method="kramers_moyal"``.)
-        window_ids: ``(T,)`` integer per-frame labels. For ``"kramers_moyal"`` ->
-            window-stratified KM (umbrella sampling); ``None`` -> single unbiased
-            trajectory. REQUIRED for ``"hummer"`` and for ``per_window=True``.
-        n_bins: coordinate resolution (``"kramers_moyal"``). min_count: bins
-            (KM) / windows (Hummer / per-window KM) below this -> dropped.
-        method: ``"kramers_moyal"`` (default) -- drift-corrected
-            ``Var(dlevel_lag)/(2 lag dt)`` per coordinate bin, lag-selected; or
-            ``"hummer"`` -- Kramers/Hummer 2005 ``Var(level)/(tau_int dt)`` per
-            WINDOW (lag-robust; integrates the autocorrelation via Geyer instead
-            of picking a lag). ``"hummer"`` assumes the coordinate is locally
-            confined within each window and so requires ``window_ids``;
-            ``lag*`` are ignored. It returns one D per window placed at the
-            window's mean coordinate value.
-        per_window: when True and ``method="kramers_moyal"``, return ONE D per
-            window (within-window short-lag drift-corrected variance, placed at
-            the window's mean coordinate value) instead of a coordinate-binned
-            profile -- the per-window counterpart of ``"hummer"``, so both
-            estimators are on the same per-window footing. Requires
-            ``window_ids``; ``lag`` defaults to 1. No-op for ``"hummer"`` (which
-            is inherently per-window).
-
-    Returns:
-        :class:`Profile` if ``at is None``, else a float / array.
+        coordinate: ``(N,)`` per-sample values, ``q(samples)`` for the committor
+            (values are clipped to ``span``).
+        sample_weights: ``(N,)`` MBAR/WHAM weights reweighting to the target
+            ensemble; the profile's ``counts`` stay unweighted.
+        n_bins, span: the histogram; ``span`` defaults to the committor's
+            ``[0, 1]``, pass ``(s.min(), s.max())`` for a collective variable.
     """
-    traj = np.asarray(trajectory)
-    levels_t, span, name = coordinate_levels(committor, traj, coordinate)
-    wid = None if window_ids is None else np.asarray(window_ids).reshape(-1)
-    T = levels_t.shape[0]
-
-    if method == "hummer":
-        if wid is None:
-            raise ValueError(
-                "diffusion_coefficient(method='hummer') requires window_ids: the "
-                "Var/tau_int estimator assumes the coordinate is locally confined "
-                "within each window (umbrella sampling or short restrained segments)."
-            )
-        if wid.shape[0] != T:
-            raise ValueError(f"window_ids length {wid.shape[0]} != trajectory length {T}")
-        prof = _estimate_D_hummer(levels_t, wid, dt, min_count, name)
-        return prof if at is None else value_at(prof, at)
-    if method != "kramers_moyal":
-        raise ValueError(f"unknown method={method!r}; use 'kramers_moyal' or 'hummer'")
-
-    if per_window:
-        if wid is None:
-            raise ValueError(
-                "diffusion_coefficient(per_window=True) requires window_ids: the "
-                "per-window Kramers-Moyal estimator needs per-frame window labels."
-            )
-        if wid.shape[0] != T:
-            raise ValueError(f"window_ids length {wid.shape[0]} != trajectory length {T}")
-        L = 1 if lag is None else int(lag)
-        prof = _estimate_D_km_per_window(levels_t, wid, L, dt, min_count, name)
-        return prof if at is None else value_at(prof, at)
-
-    edges = np.linspace(span[0], span[1], n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    bin_idx = np.clip(np.digitize(levels_t, edges) - 1, 0, n_bins - 1)
-    candidates = (int(lag),) if lag is not None else tuple(lag_candidates)
-
-    per_lag, counts_per_lag, summaries = [], [], []
-    for L in candidates:
-        if L >= T:
-            continue
-        if wid is not None:
-            D_v, cts = _estimate_D_q_stratified(levels_t, bin_idx, wid, L, dt, n_bins, min_count)
-        else:
-            D_v, cts = _estimate_D_q_lumped(levels_t, bin_idx, L, dt, n_bins, min_count)
-        if D_v.size == 0:
-            continue
-        per_lag.append((L, D_v))
-        counts_per_lag.append(cts)
-        summaries.append(_barrier_band_median(D_v, cts, centers, span))
-
-    if not per_lag:
-        raise RuntimeError("trajectory too short for any Kramers-Moyal lag")
-
-    # With an explicit lag there is a single candidate, so the picker returns 0.
-    sel = _pick_D_peak(summaries)
-    _, D_best = per_lag[sel]
-    prof = Profile(levels=centers, values=D_best, counts=counts_per_lag[sel], name=name)
-    return prof if at is None else value_at(prof, at)
+    lo, hi = float(span[0]), float(span[1])
+    x = np.clip(np.asarray(coordinate, dtype=np.float64).reshape(-1), lo, hi)
+    edges = np.linspace(lo, hi, n_bins + 1)
+    pi, counts = density_histogram(x, edges, sample_weights)
+    return Profile(0.5 * (edges[:-1] + edges[1:]), pi, counts)
 
 
-def _density_and_diffusion(
-    committor,
-    samples,
-    trajectory,
-    *,
-    dt,
-    n_bins=200,
-    sample_weights=None,
-    window_ids=None,
-    coordinate=None,
-    traj_coordinate=None,
-    lag=None,
-    lag_candidates=_LAG_CANDIDATES,
-    min_count=5,
-    diffusion_method="kramers_moyal",
-    per_window=False,
-):
-    """The committor density π(q) (from the ensemble) and diffusion D_q(q) (from
-    the trajectory) on the same grid resolution.
+def basin_populations(q_values, *, sample_weights=None, in_A=None, in_B=None):
+    """``(rho_A, rho_B)`` with ``rho_B = E[q]`` and ``rho_A = 1 - rho_B``.
 
-    These are the two profiles every committor-coordinate rate is built from.
-    Plain forwarding to :func:`density` / :func:`diffusion_coefficient`, factored
-    out so the call sites (``_committor_profiles``, :func:`kramers_rate`,
-    :func:`saddle_bridge_D`) cannot drift apart. ``per_window`` forwards to
-    :func:`diffusion_coefficient` (one D per window for ``"kramers_moyal"``).
+    The committor-weighted populations are the normaliser of the rate:
+    ``k_AB = nu_R / rho_A``. Basin masks, when given, snap ``q`` to 0 on A and
+    1 on B first, so a committor that does not reach its boundary values does
+    not leak population.
     """
-    pi_prof = density(
-        committor,
-        samples,
-        at=None,
-        sample_weights=sample_weights,
-        n_bins=n_bins,
-        coordinate=coordinate,
-    )
-    D_prof = diffusion_coefficient(
-        committor,
-        trajectory,
-        dt=dt,
-        at=None,
-        coordinate=traj_coordinate,
-        lag=lag,
-        lag_candidates=lag_candidates,
-        window_ids=window_ids,
-        n_bins=n_bins,
-        min_count=min_count,
-        method=diffusion_method,
-        per_window=per_window,
-    )
-    return pi_prof, D_prof
+    q = np.clip(np.asarray(q_values, dtype=np.float64).reshape(-1), 0.0, 1.0)
+    if in_A is not None:
+        q = np.where(np.asarray(in_A, dtype=bool).reshape(-1), 0.0, q)
+    if in_B is not None:
+        q = np.where(np.asarray(in_B, dtype=bool).reshape(-1), 1.0, q)
+    W = normalize_weights(sample_weights, q.shape[0])
+    rho_B = float(np.sum(W * q))
+    return 1.0 - rho_B, rho_B
 
 
-# =============================================================================
-# Reactive flux (TPT, committor-specific)
-# =============================================================================
-
-
-def _resolve_D(D, levels):
-    """Resolve ``D`` (scalar / callable / :class:`Profile`) to per-level values."""
-    levels = np.asarray(levels, dtype=np.float64)
-    if isinstance(D, Profile):
-        return np.atleast_1d(value_at(D, levels))
-    if callable(D):
-        return np.asarray(D(levels), dtype=np.float64)
-    return np.full(levels.shape[0], float(D))
-
-
+# ---------------------------------------------------------------------------
+# the iso-committor mean squared gradient (co-area)
+# ---------------------------------------------------------------------------
 def _grad_sq(grads, metric):
-    """``|∇q|²`` or the metric-weighted ``∇qᵀ M ∇q``.
+    """``|grad q|^2`` or the metric-weighted ``grad q^T M grad q``.
 
-    ``metric=None`` returns the ORIGINAL expression verbatim, not an equivalent
-    one: routing it through an einsum with an identity would change the float64
-    reduction order, and the published tolerances would pass while the plateau
-    flux silently drifted.
+    ``metric=None`` returns the original expression verbatim, not an
+    equivalent one: routing it through an einsum with an identity changes the
+    float64 reduction order, and the published tolerances would pass while the
+    plateau flux silently drifted.
     """
     if metric is None:
         return jnp.sum(grads**2, axis=-1)
@@ -451,313 +86,208 @@ def _grad_sq(grads, metric):
     raise ValueError(f"metric must be None, (d,) diagonal or (d, d); got ndim {M.ndim}")
 
 
-def _coarea_contributions(committor, samples, D, sample_weights, *, metric=None):
-    """Per-sample co-area contributions ``W_n · D(q_n) · |∇q̄(x_n)|²`` and levels.
+def committor_grad_sq(committor, samples, *, sample_weights=None, n_bins=200, metric=None):
+    """The iso-committor mean squared gradient ``<grad q^T M grad q>_q`` on ``[0, 1]``.
 
-    One vmapped ``value_and_grad`` pass yields both the committor value and its
-    gradient at each sample (instead of a separate value pass + gradient pass).
+    By the co-area formula the Dirichlet form splits into iso-committor
+    surfaces, ``<|grad q|^2>_pi = int_0^1 pi(q) <|grad q|^2>_q dq``, so the
+    profile is each bin's weighted sum of ``|grad q(x_n)|^2`` divided by its
+    density. One vmapped value-and-gradient pass over the samples supplies both
+    the levels and the gradients; the density is binned from the same levels.
 
-    ``metric`` replaces ``|∇q|²`` by ``∇qᵀ M ∇q``. Whatever is passed here MUST
-    also be used for the CV denominator that ``mapped_committor_diffusion``
-    divides by -- the map is only bias-free when both mean-squared gradients are
-    taken in the SAME metric.
+    ``metric`` is None (the identity, the published ``M0 = I``), a ``(d,)``
+    diagonal, or a ``(d, d)`` tensor, replacing ``|grad q|^2`` by
+    ``grad q^T M grad q``. Whatever is passed here must also be used for the
+    collective-variable denominator in :func:`committor_diffusion_from_cv`: the
+    map is only bias-free when both mean squared gradients live in one metric.
     """
-    samples_j = jnp.asarray(samples)
-    vals, grads = jax.vmap(jax.value_and_grad(committor))(samples_j)
+    vals, grads = jax.vmap(jax.value_and_grad(committor))(jnp.asarray(samples))
     g = np.asarray(_grad_sq(grads, metric), dtype=np.float64)
     levels = np.clip(np.asarray(vals, dtype=np.float64), 0.0, 1.0)
     W = normalize_weights(sample_weights, levels.shape[0])
-    D_n = _resolve_D(D, levels)
-    return levels, W * D_n * g
-
-
-def _coarea_profile(levels, contrib, n_bins):
-    """Bin per-sample co-area contributions into the Φ(c) profile on [0, 1].
-
-    Returns ``(centers, Phi, counts)`` where ``Phi_k = (Σ_{n∈bin k} contrib_n)/Δc``.
-    Only the diagnostic profile is binned; the plateau rate itself is bin-free
-    (see :func:`_plateau_flux`).
-    """
     edges = np.linspace(0.0, 1.0, n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
     bin_idx = np.clip(np.digitize(np.clip(levels, 0.0, 1.0 - 1e-12), edges) - 1, 0, n_bins - 1)
-    Phi = np.bincount(bin_idx, weights=contrib, minlength=n_bins) * n_bins
-    counts = np.bincount(bin_idx, minlength=n_bins)
-    return centers, Phi, counts
+    Phi = np.bincount(bin_idx, weights=W * g, minlength=n_bins) * n_bins
+    pi, counts = density_histogram(levels, edges, sample_weights)
+    values = np.where(pi > 0, Phi / np.where(pi > 0, pi, 1.0), np.nan)
+    return Profile(0.5 * (edges[:-1] + edges[1:]), values, counts)
 
 
-def _plateau_flux(levels, contrib, lo, hi):
-    """Bin-free plateau-MC flux: ``(Σ_{lo≤q≤hi} contrib) / (hi − lo)``."""
-    if hi <= lo:
-        raise ValueError(
-            f"plateau range must satisfy lo < hi; got lo={lo}, hi={hi}. A "
-            "zero-width range has no well-defined flux (pass at=(lo, hi) with lo < hi)."
-        )
-    mask = (levels >= lo) & (levels <= hi)
-    return float(np.sum(contrib[mask]) / (hi - lo))
+# ---------------------------------------------------------------------------
+# the CV -> committor map
+# ---------------------------------------------------------------------------
+def committor_diffusion_from_cv(grad_sq_profile, *, D_s, cv_grad_sq) -> Profile:
+    """Map a diffusion measured along a collective variable into committor space.
 
+    The diffusion is honestly measurable along the coordinate the sampling
+    biases (``s``, the umbrella variable; :func:`pooled_acf_diffusion`), while
+    the rate needs it along the committor, where nothing confines the dynamics
+    at the barrier. Both scalars are one configurational diffusion tensor
+    contracted along two gradients. With ``D = D0 M0`` (one scale, ``M0 = I``
+    in the published setting) they read ``D_s = D0 <|grad s|^2>`` and
+    ``D_q(q) = D0 <|grad q|^2>_q``, and eliminating ``D0`` gives the map::
 
-def reactive_flux(committor, samples, *, D, at=None, sample_weights=None, n_bins=200,
-                  metric=None):
-    """TPT reactive flux Φ through iso-committor surfaces.
+        D_q(q) = D_s <|grad q|^2>_q / <|grad s|^2>
 
-    ``Φ(q*) = ∫_{q̄=q*} π D |∇q̄| dS`` is constant in q* for the true committor
-    and equals the reaction rate ν_R; for an approximate committor it is flat on
-    a saddle plateau near q*≈0.5 and inflates in the basins.
-
-    Args:
-        committor: callable ``q(x)``.
-        samples: ``(N, dim)`` static ensemble.
-        D: scalar, callable ``level -> D``, or a diffusion :class:`Profile`.
-        at: ``None`` -> :class:`Profile` of Φ(c); scalar -> Φ(q*); ``(lo, hi)``
-            -> bin-free plateau Monte-Carlo flux over the range (requires ``lo < hi``).
-        sample_weights: ``(N,)`` optional MBAR weights.
-        n_bins: number of iso-committor bins for the Φ(c) profile (the ``(lo, hi)``
-            plateau flux itself is bin-free).
-
-    Returns:
-        :class:`Profile` if ``at is None``, else a float.
-    """
-    levels, contrib = _coarea_contributions(
-        committor, samples, D, sample_weights, metric=metric)
-    centers, Phi, counts = _coarea_profile(levels, contrib, n_bins)
-    prof = Profile(levels=centers, values=Phi, counts=counts, name="committor")
-    if at is None:
-        return prof
-    if _is_range(at):
-        return _plateau_flux(levels, contrib, float(at[0]), float(at[1]))
-    return value_at(prof, at)
-
-
-# =============================================================================
-# Saddle bridge: calibrated configurational D for the feature-space rate
-# =============================================================================
-
-
-class BridgeD(NamedTuple):
-    """Calibrated scalar configurational diffusion from the iso-committor identity.
-
-    The feature-space flux density at level ``q*`` is ``D·⟨|∇q̄|²⟩_{q*}·π(q*)``
-    while the committor-coordinate flux density is ``D_q(q*)·π(q*)``. Matching
-    them fixes the scalar ``D`` so the (geometric) feature-space estimator
-    reproduces the (dynamical) committor-coordinate rate:
-
-        D = D_q(q*) / ⟨|∇q̄|²⟩_{q*}          (mode="saddle_local")
-          = ⟨D_q⟩_π / ⟨|∇q̄|²⟩_π             (mode="volume_average")
-
-    This is the principled choice of the length-scale ``D`` for
-    :func:`dirichlet_rate` / :func:`tpt_rate` / :func:`reactive_flux`: a raw
-    local-atomic D mismatches the committor's coordinate units (it over- or
-    under-counts the flux), whereas this ``D`` is calibrated to the trajectory's
-    own committor-coordinate diffusion. The object is **callable** (returns the
-    constant ``D`` for any level) so it drops straight into the ``D=`` argument;
-    its calibration intermediates are kept as fields.
-    """
-
-    D: float  # the calibrated scalar configurational diffusion
-    D_q_ref: float  # D_q(q*) (saddle_local) or ⟨D_q⟩_π (volume_average)
-    g_ref: float  # ⟨|∇q̄|²⟩_{q*} (saddle_local) or ⟨|∇q̄|²⟩_π (volume_average)
-    q_star: float
-    mode: str
-
-    def __call__(self, levels):
-        return np.full(np.shape(levels), self.D, dtype=np.float64)
-
-
-def saddle_bridge_D(
-    committor,
-    samples,
-    trajectory,
-    *,
-    dt,
-    q_star=0.5,
-    mode="saddle_local",
-    band=0.1,
-    sample_weights=None,
-    window_ids=None,
-    n_bins=200,
-    coordinate=None,
-    traj_coordinate=None,
-    lag=None,
-    lag_candidates=_LAG_CANDIDATES,
-    min_count=5,
-    diffusion_method="kramers_moyal",
-    per_window=False,
-):
-    """Calibrated configurational scalar D bridging the two rate families.
-
-    Combines the committor-coordinate diffusion ``D_q(q)`` (from the trajectory)
-    with the feature-space gradient geometry ``⟨|∇q̄|²⟩(q) = Φ_{D=1}(q)/π(q)``
-    (from the static ensemble) into a single scalar ``D`` (see
-    :class:`BridgeD`). Feed the result into :func:`tpt_rate` / :func:`dirichlet_rate`
-    as ``D=`` to obtain the q-stratified-plateau ("geometric") rate calibrated so
-    it reproduces the committor-coordinate value -- i.e. the principled version of
-    the q-stratified flux estimator (sc_simon / main-repo ``dirichlet_stratified``),
-    which otherwise depends on a hand-supplied scalar D.
+    The single scalar ``D0 = D_s / <|grad s|^2>`` carries all the physical
+    time; the shape of ``D_q`` is geometry, from :func:`committor_grad_sq`.
+    Because the map is exactly linear in the numerator and inverse-linear in
+    the denominator, both must be taken in the same feature space and metric.
 
     Args:
-        committor, samples, trajectory, dt: as in :func:`berezhkovskii_szabo_rate`.
-        q_star: calibration level for ``mode="saddle_local"`` (default 0.5).
-        mode: ``"saddle_local"`` (single level ``q*``) or ``"volume_average"``.
-        band: half-width of the averaging window around ``q*`` (saddle_local).
-        diffusion_method: ``"kramers_moyal"`` or ``"hummer"`` (needs ``window_ids``).
-        (remaining args forwarded to :func:`density` / :func:`diffusion_coefficient`
-        / :func:`reactive_flux`; the gradient profile uses the same ``n_bins`` so
-        its grid aligns with ``π``.)
-
-    Returns:
-        :class:`BridgeD` (callable scalar D + calibration diagnostics).
+        grad_sq_profile: :func:`committor_grad_sq` of the fitted committor.
+        D_s: the diffusion along ``s``, in ``(units of s)^2 / time``.
+        cv_grad_sq: ``<|grad s|^2>`` in the feature space and metric of the
+            numerator (:func:`linear_response_grad_sq`), or ``1.0`` when ``s``
+            is itself a feature, or when a known configurational ``D0`` is
+            assumed and passed as ``D_s``.
     """
-    pi_prof, D_prof = _density_and_diffusion(
-        committor,
-        samples,
-        trajectory,
-        dt=dt,
-        n_bins=n_bins,
-        sample_weights=sample_weights,
-        window_ids=window_ids,
-        coordinate=coordinate,
-        traj_coordinate=traj_coordinate,
-        lag=lag,
-        lag_candidates=lag_candidates,
-        min_count=min_count,
-        diffusion_method=diffusion_method,
-        per_window=per_window,
-    )
-    # ⟨|∇q̄|²⟩(q) = Φ_{D=1}(q) / π(q): the iso-q-conditional mean squared gradient
-    # (the co-area sum divided by the density on the SAME [0,1] grid).
-    Phi1 = reactive_flux(
-        committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins
-    )
-    pi = np.asarray(pi_prof.values, dtype=np.float64)
-    g_of_q = np.where(
-        pi > 0, np.asarray(Phi1.values, dtype=np.float64) / np.where(pi > 0, pi, 1.0), np.nan
-    )
-    g_prof = Profile(
-        levels=np.asarray(pi_prof.levels, dtype=np.float64),
-        values=g_of_q,
-        counts=pi_prof.counts,
-        name="committor",
-    )
-
-    if mode == "saddle_local":
-        lo, hi = max(0.0, q_star - band), min(1.0, q_star + band)
-        D_q_ref = value_at(D_prof, (lo, hi))
-        if not np.isfinite(D_q_ref):
-            D_q_ref = value_at(D_prof, q_star)
-        g_ref = value_at(g_prof, (lo, hi))
-        if not np.isfinite(g_ref):
-            g_ref = value_at(g_prof, q_star)
-        if not (np.isfinite(D_q_ref) and np.isfinite(g_ref) and g_ref > 0):
-            raise RuntimeError(
-                f"saddle_bridge_D(saddle_local@{q_star}): no finite positive "
-                f"D_q/⟨|∇q̄|²⟩ around q*={q_star} (got D_q={D_q_ref}, g={g_ref})"
-            )
-        return BridgeD(float(D_q_ref / g_ref), float(D_q_ref), float(g_ref), float(q_star), mode)
-
-    if mode == "volume_average":
-        centers = np.asarray(pi_prof.levels, dtype=np.float64)
-        dq = float(centers[1] - centers[0])
-        D_lev = np.asarray(D_prof.levels, dtype=np.float64)
-        D_val = np.asarray(D_prof.values, dtype=np.float64)
-        goodD = np.isfinite(D_val) & (D_val > 0)
-        if not np.any(goodD):
-            raise RuntimeError("saddle_bridge_D(volume_average): no valid D_q bins")
-        Dq_on_pi = np.interp(centers, D_lev[goodD], D_val[goodD])
-        valid = np.isfinite(Dq_on_pi) & (Dq_on_pi > 0) & (pi > 0)
-        pi_sum = float(np.sum(pi[valid]) * dq)
-        if pi_sum <= 0:
-            raise RuntimeError("saddle_bridge_D(volume_average): π integrates to ≤ 0")
-        D_q_pi_avg = float(np.sum(Dq_on_pi[valid] * pi[valid]) * dq / pi_sum)
-        # ⟨|∇q̄|²⟩_π = ∫ Φ_{D=1}(c) dc (the co-area identity), bin-free in counts.
-        g_pi_avg = float(np.sum(np.asarray(Phi1.values, dtype=np.float64)) / n_bins)
-        if not (np.isfinite(g_pi_avg) and g_pi_avg > 0):
-            raise RuntimeError("saddle_bridge_D(volume_average): ⟨|∇q̄|²⟩_π ≤ 0")
-        return BridgeD(float(D_q_pi_avg / g_pi_avg), D_q_pi_avg, g_pi_avg, float(q_star), mode)
-
-    raise ValueError(f"unknown mode={mode!r}; use 'saddle_local' or 'volume_average'")
-
-
-def mapped_committor_diffusion(
-    committor,
-    samples,
-    *,
-    D_s,
-    cv_grad_sq,
-    sample_weights=None,
-    n_bins=200,
-    at=None,
-    metric=None,
-):
-    """Committor-space diffusion D_q(q) MAPPED from the umbrella-CV diffusion D_s.
-
-    The diffusion coefficient is honestly measurable only along the umbrella CV
-    ``s`` (the Hummer in-window estimator gives ``D_s``); a direct committor-space
-    measurement would need path-space reweighting at the unstable barrier. But both
-    scalar diffusivities are the SAME Cartesian diffusion tensor contracted along
-    two different gradients. Under the one-parameter shape assumption ``D = D0 M0``
-    with ``M0 = I`` (isotropic in the slicing/feature space -- the recommended
-    default), both reduce to the single configurational scale ``D0`` seen through a
-    gradient,
-
-        D_s = D0 <|grad s|^2>,    D_q(q) = D0 <|grad q|^2>_q ,
-
-    so eliminating ``D0`` gives the bias-free MAP onto the committor coordinate
-
-        D_q(q) = D_s * <|grad q|^2>_q / <|grad s|^2> .
-
-    The committor mean-squared-gradient profile ``<|grad q|^2>_q = Phi_{D=1}(q)/pi(q)``
-    is the co-area identity (no length-scale, and for the sliced ansatz no autodiff
-    through a learned committor). Only the single scalar ``D0 = D_s/<|grad s|^2>``
-    carries physical-time content; it is the lone dynamical input, taken from the
-    clean CV measurement rather than estimated on the barrier. See
-    Petersen/Lichtinger/Covino 2026, "Rates in committor space: mapping the
-    diffusion coefficient from the umbrella CV".
-
-    Args:
-        committor: callable ``q(x)``.
-        samples: ``(N, dim)`` static ensemble (for the co-area gradient + pi).
-        D_s: the configurational-scale diffusion measured along the umbrella CV
-            (e.g. the barrier-band Hummer value), in (CV-units)^2 / time.
-        cv_grad_sq: the CV's mean squared gradient ``<|grad s|^2>`` in the SAME
-            (slicing/feature) space as the committor gradient, and -- crucially --
-            in the SAME METRIC. The single scalar ``D0 = D_s / cv_grad_sq`` sets
-            the whole physical scale.
-        metric: None (the published ``M0 = I``), a ``(d,)`` diagonal, or a
-            ``(d, d)`` tensor, replacing ``<|grad q|^2>`` by
-            ``<grad q^T M grad q>``. It is the CALLER's responsibility to pass a
-            ``cv_grad_sq`` computed in the same metric; mixing metrics between the
-            numerator and the denominator is dimensionally incoherent and silently
-            rescales every rate.
-        sample_weights: ``(N,)`` optional MBAR/WHAM weights.
-        n_bins: committor-coordinate resolution of the returned profile.
-        at: ``None`` -> the full :class:`Profile` of D_q(q); else value(s) at the
-            requested committor level(s) / range.
-
-    Returns:
-        :class:`Profile` of D_q(q) if ``at is None``, else a float / array.
-    """
+    D_s = float(D_s)
     g_s = float(cv_grad_sq)
+    if not (np.isfinite(D_s) and D_s > 0):
+        raise ValueError(f"D_s must be finite and positive; got {D_s!r}")
     if not (np.isfinite(g_s) and g_s > 0):
         raise ValueError(f"cv_grad_sq must be finite and positive; got {cv_grad_sq!r}")
-    if not (np.isfinite(float(D_s)) and float(D_s) > 0):
-        raise ValueError(f"D_s must be finite and positive; got {D_s!r}")
-    pi_prof = density(committor, samples, sample_weights=sample_weights, n_bins=n_bins)
-    Phi1 = reactive_flux(
-        committor, samples, D=1.0, at=None, sample_weights=sample_weights, n_bins=n_bins,
-        metric=metric,
+    D0 = D_s / g_s
+    return Profile(
+        np.asarray(grad_sq_profile.levels, dtype=np.float64),
+        D0 * np.asarray(grad_sq_profile.values, dtype=np.float64),
+        grad_sq_profile.counts,
     )
-    pi = np.asarray(pi_prof.values, dtype=np.float64)
-    # <|grad q|^2>(q) = Phi_{D=1}(q) / pi(q) (co-area identity).
-    g_of_q = np.where(
-        pi > 0, np.asarray(Phi1.values, dtype=np.float64) / np.where(pi > 0, pi, 1.0), np.nan
-    )
-    D0 = float(D_s) / g_s  # the single configurational scale from the CV
-    Dq = D0 * g_of_q
-    prof = Profile(
-        levels=np.asarray(pi_prof.levels, dtype=np.float64),
-        values=Dq,
-        counts=pi_prof.counts,
-        name="committor",
-    )
-    return prof if at is None else value_at(prof, at)
+
+
+def linear_response_grad_sq(cv_values, features, sample_weights=None, *, metric=None) -> float:
+    """``<|grad s|^2>`` of a collective variable by linear response, ``a^T M a``.
+
+    Fits ``s ~ a . x + b`` by weighted, lightly ridged least squares and reads
+    the gradient off the coefficient. It is exact when ``s`` is a linear
+    function of the features (``s`` itself a feature gives 1). It is the
+    denominator the published rates use, and its caveat matters: ``a`` is a
+    best-linear-predictor coefficient, not a pointwise gradient, so the value
+    depends on the fitting window rather than on the field. On the pooled
+    chignolin data (630,063 frames, 86 torsion features) the global fit gives
+    0.222 while per-umbrella-window fits give 0.0066, a 33x swing that a
+    genuine pointwise average cannot produce, and the rate is linear in it.
+    When ``s = f(x)`` is differentiable, differentiate it instead; when it is
+    not, :func:`committor_diffusion_from_cv_reparam` needs no gradient of
+    ``s`` at all.
+
+    ``metric`` (None, ``(d,)`` or ``(d, d)``) must match the one used in
+    :func:`committor_grad_sq`.
+    """
+    X = np.asarray(features, dtype=np.float64)
+    s = np.asarray(cv_values, dtype=np.float64).reshape(-1)
+    w = normalize_weights(sample_weights, s.shape[0])
+    xbar = (w[:, None] * X).sum(axis=0)
+    Xc = X - xbar
+    sc = s - float((w * s).sum())
+    d = Xc.shape[1]
+    A = Xc.T @ (w[:, None] * Xc)
+    lam = 1e-6 * (float(np.trace(A)) / max(d, 1) + _TINY)
+    coef = np.linalg.solve(A + lam * np.eye(d), Xc.T @ (w * sc))
+    if metric is None:
+        return float(coef @ coef)
+    M = np.asarray(metric, dtype=np.float64)
+    return float(coef @ (M * coef if M.ndim == 1 else M @ coef))
+
+
+# ---------------------------------------------------------------------------
+# the reparametrisation route: no gradient of s
+# ---------------------------------------------------------------------------
+def _silverman_bandwidth(x, w):
+    mu = float(np.average(x, weights=w))
+    sd = np.sqrt(max(float(np.average((x - mu) ** 2, weights=w)), 1e-12))
+    n_eff = (w.sum() ** 2) / max((w * w).sum(), _TINY)
+    return float(max(0.9 * sd * n_eff ** (-0.2), 1e-3))
+
+
+def _local_linear(x, y, w, query, bandwidth, *, min_neff=8.0):
+    """Gaussian-kernel local-linear regression of ``y`` on ``x``: value and slope at ``query``."""
+    h = _silverman_bandwidth(x, w) if bandwidth is None else float(bandwidth)
+    value = np.full(query.shape, np.nan)
+    slope = np.full(query.shape, np.nan)
+    for i, x0 in enumerate(query):
+        u = (x - x0) / h
+        k = np.exp(-0.5 * u * u) * w
+        sk = k.sum()
+        if sk <= 0:
+            continue
+        n_eff = (sk * sk) / max((k * k).sum(), _TINY)
+        if n_eff < min_neff:  # too few effective points for a slope: kernel mean only
+            value[i] = float((k * y).sum() / sk)
+            continue
+        dx = x - x0
+        Swx = float((k * dx).sum())
+        Swxx = float((k * dx * dx).sum())
+        Swy = float((k * y).sum())
+        Swxy = float((k * dx * y).sum())
+        det = sk * Swxx - Swx * Swx
+        if abs(det) <= _TINY * (sk * Swxx + _TINY):
+            value[i], slope[i] = Swy / sk, 0.0
+        else:
+            value[i] = (Swxx * Swy - Swx * Swxy) / det
+            slope[i] = (sk * Swxy - Swx * Swy) / det
+    return value, slope
+
+
+def _weighted_r2(x, y, w):
+    xb = float((w * x).sum())
+    yb = float((w * y).sum())
+    cov = float((w * (x - xb) * (y - yb)).sum())
+    vx = float((w * (x - xb) ** 2).sum())
+    vy = float((w * (y - yb) ** 2).sum())
+    return float(cov * cov / max(vx * vy, _TINY))
+
+
+def committor_diffusion_from_cv_reparam(
+    q_values, s_values, D_s, *, sample_weights=None, n_bins=200, bandwidth=None, r2_min=0.9
+) -> Profile:
+    """``D_q(q) = D_s(s(q)) (dq/ds)^2`` through the empirical relation ``s(q)``.
+
+    When the committor is (close to) a monotone function of the collective
+    variable, the change of variables needs only the map ``s(q) = E[s | q]``
+    and its slope, which a local-linear regression supplies. No gradient of
+    ``s`` in feature space is formed, so this route is free of the
+    linear-response caveat of :func:`linear_response_grad_sq`. Its own
+    assumption is monotonicity, gated by the weighted squared Spearman rank
+    correlation between ``q`` and ``s`` (exactly 1 for any monotone relation,
+    whatever its shape): the function raises when it is below ``r2_min``.
+
+    Args:
+        q_values, s_values: ``(N,)`` per-sample committor and CV values.
+        D_s: the diffusion along ``s``, a scalar or a :class:`Profile` along
+            ``s`` (:func:`hummer_diffusion`), interpolated at ``s(q)``.
+        sample_weights: ``(N,)`` MBAR/WHAM weights.
+        n_bins: committor grid of the returned profile.
+        bandwidth: kernel bandwidth in ``q`` (Silverman's rule when None).
+        r2_min: the monotonicity gate, on the squared rank correlation.
+    """
+    q = np.clip(np.asarray(q_values, dtype=np.float64).reshape(-1), 0.0, 1.0)
+    s = np.asarray(s_values, dtype=np.float64).reshape(-1)
+    if s.shape[0] != q.shape[0]:
+        raise ValueError(f"s_values length {s.shape[0]} != q_values length {q.shape[0]}")
+    w = normalize_weights(sample_weights, q.shape[0])
+    rho2 = _weighted_r2(rankdata(q), rankdata(s), w)
+    if rho2 < r2_min:
+        raise ValueError(
+            f"q and s are not monotonically related (weighted Spearman rho^2 = {rho2:.3f} "
+            f"< r2_min = {r2_min}); the reparametrisation D_q = D_s (dq/ds)^2 needs a "
+            "monotone s(q). Use committor_diffusion_from_cv instead."
+        )
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    grid = 0.5 * (edges[:-1] + edges[1:])
+    s_of_q, ds_dq = _local_linear(q, s, w, grid, bandwidth)
+    if isinstance(D_s, Profile):
+        lv = np.asarray(D_s.levels, dtype=np.float64)
+        dv = np.asarray(D_s.values, dtype=np.float64)
+        good = np.isfinite(lv) & np.isfinite(dv) & (dv > 0)
+        if not np.any(good):
+            raise ValueError("D_s profile has no finite positive values")
+        Ds_at = np.interp(s_of_q, lv[good], dv[good])
+    else:
+        Ds_at = np.full(grid.shape, float(D_s))
+    slope_sq = ds_dq**2
+    ok = np.isfinite(slope_sq) & (slope_sq > 1e-12)
+    Dq = np.where(ok, Ds_at / np.maximum(slope_sq, _TINY), np.nan)
+    counts, _ = np.histogram(q, bins=edges)
+    return Profile(grid, Dq, counts)

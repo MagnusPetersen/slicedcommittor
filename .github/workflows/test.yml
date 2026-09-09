@@ -40,3 +40,18 @@ jobs:
         with:
           name: coverage-xml
           path: coverage.xml
+
+  umbrella:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install with the umbrella extra (mdtraj, pymbar)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test,umbrella]
+      - name: Run the umbrella tests with MBAR and mdtraj present
+        run: pytest sliced_committor/tests -k "umbrella or public_api" -v

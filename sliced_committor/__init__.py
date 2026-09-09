@@ -41,7 +41,26 @@ from .core.directions import (
 )
 from .core.metric import AngleSign, sincos_pullback_metric
 from .core.solver import SlicedCommittorResult, compute_sliced_committor
-# RATES_IMPORT_PLACEHOLDER (Phase 2 restores this)
+from .rates import (
+    PlateauWindow,
+    PooledDiffusion,
+    Profile,
+    basin_populations,
+    committor_diffusion_from_cv,
+    committor_diffusion_from_cv_reparam,
+    committor_grad_sq,
+    committor_rate,
+    density,
+    diffusion_profile,
+    find_plateau,
+    flux_flatness,
+    hummer_diffusion,
+    lag_scan,
+    linear_response_grad_sq,
+    pooled_acf_diffusion,
+    rate_from_profiles,
+    value_at,
+)
 
 __all__ = [
     # the committor
@@ -74,6 +93,7 @@ __all__ = [
     "lag_scan",
     "hummer_diffusion",
     "pooled_acf_diffusion",
+    "PooledDiffusion",
     "committor_diffusion_from_cv",
     "committor_diffusion_from_cv_reparam",
     "linear_response_grad_sq",
@@ -81,6 +101,7 @@ __all__ = [
     "rate_from_profiles",
     "Profile",
     "value_at",
+    "flux_flatness",
     "find_plateau",
     "PlateauWindow",
 ]

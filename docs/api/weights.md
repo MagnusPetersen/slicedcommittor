@@ -1,25 +1,26 @@
-# Weight solvers and epsilon estimators
+# The weights
 
 ```{eval-rst}
-.. automodule:: sliced_committor.core.weights
+.. automodule:: sliced_committor.core._ebmc
    :members:
-      corrected_dirichlet_inv_rd,
-      full_gram_weights,
-      compute_epsilon,
-      compute_epsilon_equilibrium,
-      compute_epsilon_rms,
-      compute_epsilon_flux1d,
-      get_all_weight_functions,
-      get_default_weight_functions
+      solve_weights,
+      Weights,
+      bootstrap_weights,
+      Bootstrap,
+      RepresentationError
+```
 
-.. automodule:: sliced_committor.core._bmc
-   :members:
-      basin_moment_weights,
-      BMCRepresentationError
+## The half-set spectral filter
 
-.. automodule:: sliced_committor.core._bmc_enriched
+The regularisation behind the default `tikhonov="halfset_eigen"`, the
+contiguous basin-stratified folds, and the held-out Dirichlet cap. Reached
+through `solve_weights`; documented here for the record.
+
+```{eval-rst}
+.. automodule:: sliced_committor.core._halfset
    :members:
-      enriched_basin_moment_weights,
-      enriched_basin_moment_weights_power,
-      EnrichedBMCRepresentationError
+      make_folds,
+      halfset_grams,
+      halfset_eigen_regularize,
+      regularized_gram
 ```

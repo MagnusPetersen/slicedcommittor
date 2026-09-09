@@ -6,6 +6,10 @@
   research prototype so the frozen references in ``golden/`` reproduce bit for bit.
 * ``double_well_samples`` + ``double_well_pde``: a 2D double well with a Jacobi
   finite-difference committor as the reference.
+* ``ou_trajectory`` / ``windowed_ou`` / ``overdamped_double_well_trajectory``:
+  time series with a known diffusion coefficient, for the rate estimators.
+* ``double_well_1d_profiles``: the analytic ``{pi(q), D_q(q)}`` of the exact
+  committor of a 1D double well, whose flux is constant by construction.
 """
 
 import jax.numpy as jnp
@@ -171,3 +175,108 @@ def double_well_eval_points(nx=25, ny=15, pad=0.30):
         | ((pts[:, 0] - DW_CENTER_B[0]) ** 2 + pts[:, 1] ** 2 < pad**2)
     )
     return pts[keep]
+
+
+# ---------------------------------------------------------------------------
+# Time series with a known diffusion coefficient
+# ---------------------------------------------------------------------------
+def ou_trajectory(n, *, dt=0.01, k=1.0, D=0.05, seed=0, rng=None):
+    """Euler-Maruyama Ornstein-Uhlenbeck ``dx = -k x dt + sqrt(2 D) dW`` from 0; ``(n,)``."""
+    rng = np.random.default_rng(seed) if rng is None else rng
+    x = np.empty(n)
+    xi = 0.0
+    noise = np.sqrt(2.0 * D * dt)
+    for t in range(n):
+        xi = xi - k * xi * dt + noise * rng.standard_normal()
+        x[t] = xi
+    return x
+
+
+def windowed_ou(n_win=6, n_per=20000, *, dt=0.01, k=1.0, D=0.05, seed=3, centers=None):
+    """``n_win`` independent confined OU runs laid end to end; ``(x, window_ids)``.
+
+    ``centers[w]`` shifts window ``w`` (all at 0 by default), for tests of a
+    selection by window mean.
+    """
+    rng = np.random.default_rng(seed)
+    xs, wid = [], []
+    for w in range(n_win):
+        x = ou_trajectory(n_per, dt=dt, k=k, D=D, rng=rng)
+        xs.append(x + (0.0 if centers is None else float(centers[w])))
+        wid.append(np.full(n_per, w))
+    return np.concatenate(xs), np.concatenate(wid)
+
+
+def overdamped_double_well_trajectory(T=60000, *, dt=0.01, D0=0.05, seed=1):
+    """Overdamped Langevin on the 2D double well with mobility ``D0``; ``(T, 2)``."""
+    rng = np.random.default_rng(seed)
+    x = np.array([-1.0, 0.0])
+    out = np.empty((T, 2))
+    noise = np.sqrt(2.0 * D0 * dt)
+    for t in range(T):
+        grad = np.array([4.0 * x[0] * (x[0] ** 2 - 1.0), x[1]])
+        x = x - D0 * grad * dt + noise * rng.standard_normal(2)
+        out[t] = x
+    return out
+
+
+def double_well_1d_profiles(n_bins=2000, *, D=0.05):
+    """Analytic ``{pi(q), D_q(q)}`` of 1D diffusion in ``V = (x^2 - 1)^2`` between the minima.
+
+    With the minima as the states the exact committor is ``q(x) = int_{-1}^x
+    e^V / int_{-1}^1 e^V``, so ``pi(q) = Z_q e^{-2V(x(q))} / Z_pi`` (normalised
+    on the transition region) and ``D_q(q) = D q'(x(q))^2``, whose product is
+    the constant ``D / (Z_q Z_pi)``. Returns ``(pi, D_q, rho_A, rho_B,
+    nu_exact)`` on a midpoint grid of ``n_bins`` bins; ``rho_A`` is the same
+    discrete sum the library uses, so every reduction must reproduce
+    ``nu_exact / rho`` to rounding.
+    """
+    from sliced_committor import Profile
+
+    x = np.linspace(-1.0, 1.0, 200_001)
+    dx = x[1] - x[0]
+    V = (x**2 - 1.0) ** 2
+    eV = np.exp(V)
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (eV[1:] + eV[:-1]) * dx)])
+    Z_q = float(cum[-1])
+    emV = np.exp(-V)
+    Z_pi = float(np.sum(0.5 * (emV[1:] + emV[:-1]) * dx))
+    centers = (np.arange(n_bins) + 0.5) / n_bins
+    x_c = np.interp(centers, cum / Z_q, x)
+    V_c = (x_c**2 - 1.0) ** 2
+    pi = Z_q * np.exp(-2.0 * V_c) / Z_pi
+    D_q = D * np.exp(2.0 * V_c) / Z_q**2
+    rho_A = float(np.sum((1.0 - centers) * pi) / n_bins)
+    ones = np.ones(n_bins, dtype=np.int64)
+    return (
+        Profile(centers, pi, ones),
+        Profile(centers, D_q, ones),
+        rho_A,
+        1.0 - rho_A,
+        D / (Z_q * Z_pi),
+    )
+
+
+def umbrella_double_well(n_windows=8, n_per=20000, *, dt=0.01, D0=0.05, kappa=15.0, seed=0):
+    """Overdamped Langevin umbrella windows on ``V = (x^2 - 1)^2 + y^2 / 2``, restrained in ``x``.
+
+    Returns ``(x, y, window_ids, centers, kappa)`` in per-window time order,
+    all windows integrated at once. The restraint ``0.5 kappa (x - c_k)^2``
+    acts on ``x`` only and ``y`` is a decoupled nuisance coordinate, so the
+    exact committor is a function of ``x`` alone and the mobility ``D0`` is
+    the diffusion coefficient of both coordinates.
+    """
+    rng = np.random.default_rng(seed)
+    centers = np.linspace(-1.4, 1.4, n_windows)
+    noise = np.sqrt(2.0 * D0 * dt)
+    x = centers.copy()
+    y = np.zeros(n_windows)
+    xs = np.empty((n_windows, n_per))
+    ys = np.empty((n_windows, n_per))
+    for t in range(n_per):
+        fx = 4.0 * x * (x * x - 1.0) + kappa * (x - centers)
+        x = x - D0 * fx * dt + noise * rng.standard_normal(n_windows)
+        y = y - D0 * y * dt + noise * rng.standard_normal(n_windows)
+        xs[:, t], ys[:, t] = x, y
+    window_ids = np.repeat(np.arange(n_windows), n_per)
+    return xs.ravel(), ys.ravel(), window_ids, centers, kappa

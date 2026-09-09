@@ -44,7 +44,7 @@ _BINNING_METHODS = ("quantile", "equal_width")
 class SlicedCommittorResult(NamedTuple):
     """The slice basis: per-direction 1D committors and their diagnostics.
 
-    Fields:
+    Attributes:
         directions: ``(M, dim)`` unit vectors.
         slice_coords: ``(M, n_bins)`` bin centres along each slice.
         free_energies: ``(M, n_bins)`` ``-log rho`` along each slice (beta = 1).

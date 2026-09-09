@@ -34,6 +34,7 @@ EXPECTED = sorted(
         "lag_scan",
         "hummer_diffusion",
         "pooled_acf_diffusion",
+        "PooledDiffusion",
         "committor_diffusion_from_cv",
         "committor_diffusion_from_cv_reparam",
         "linear_response_grad_sq",
@@ -41,6 +42,7 @@ EXPECTED = sorted(
         "rate_from_profiles",
         "Profile",
         "value_at",
+        "flux_flatness",
         "find_plateau",
         "PlateauWindow",
     ]

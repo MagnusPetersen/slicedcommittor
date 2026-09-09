@@ -1,27 +1,16 @@
-"""scipy-free numeric helpers for the rate computations (host-side numpy).
+"""Host-side numpy helpers shared by the rate quantities.
 
-The library depends only on jax + numpy. These small helpers replace the
-``scipy.integrate`` calls used in the research code so no scipy dependency is
-pulled in.
+The published rates are checked against reference values at 2e-3 relative, and
+the density histogram defines the binning every one of them reads. Keeping
+these two small routines under this package's control means a change in a
+third-party histogram or normalisation convention cannot move them.
 """
 
 import numpy as np
 
 
-def cumulative_trapezoid(y, dx: float = 1.0, initial: float = 0.0) -> np.ndarray:
-    """Cumulative trapezoidal integral, matching ``scipy.integrate``'s
-    ``cumulative_trapezoid(y, dx=dx, initial=initial)``.
-
-    Output has the same length as ``y``; element 0 equals ``initial`` and
-    element k equals ``initial + ∫_0^k y``.
-    """
-    y = np.asarray(y, dtype=np.float64)
-    seg = 0.5 * (y[1:] + y[:-1]) * dx
-    return np.concatenate([[float(initial)], float(initial) + np.cumsum(seg)])
-
-
 def normalize_weights(sample_weights, n: int) -> np.ndarray:
-    """Return ``(n,)`` weights summing to 1; uniform ``1/n`` when None."""
+    """``(n,)`` weights summing to one; uniform ``1/n`` when None."""
     if sample_weights is None:
         return np.full(n, 1.0 / n)
     w = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
@@ -34,11 +23,10 @@ def normalize_weights(sample_weights, n: int) -> np.ndarray:
 
 
 def density_histogram(levels, edges, weights=None):
-    """Empirical density on ``edges`` (integrates to 1), plus raw bin counts.
+    """Empirical density on ``edges`` (integrating to one) and the raw bin counts.
 
-    With ``weights`` (e.g. MBAR), the histogram is reweighted to the target
-    ensemble; ``counts`` are always the unweighted per-bin sample counts (used
-    for undersampling guards).
+    With ``weights`` (MBAR or WHAM) the histogram is reweighted to the target
+    ensemble; ``counts`` are always the unweighted per-bin sample counts.
     """
     levels = np.asarray(levels, dtype=np.float64)
     dq = float(edges[1] - edges[0])

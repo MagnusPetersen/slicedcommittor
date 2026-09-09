@@ -1,88 +1,74 @@
 # Contributing to sliced-committor
 
-Thanks for your interest. The library is small and welcomes focused improvements.
+The library is small and welcomes focused improvements. It keeps one way to
+do each thing; a proposed alternative needs the evidence that it is better,
+and `docs/design_decisions.md` lists what has already been tried.
 
 ## Development setup
 
-Clone the monorepo, then install the library in editable mode with all dev extras:
-
 ```bash
-pip install -e ./lib[dev]
+pip install -e .[dev]     # test, docs, lint, examples and umbrella extras
+pre-commit install        # ruff, ruff format, and the em-dash check
 ```
 
-This pulls test (pytest, pytest-cov), docs (sphinx, furo, myst-parser,
-sphinx-autodoc-typehints), lint (ruff, pre-commit), and example (matplotlib,
-jupyter) dependencies.
+## Layout
 
-Activate pre-commit so style is enforced locally:
-
-```bash
-cd lib
-pre-commit install
+```
+sliced_committor/
+  core/        the committor: solver.py (slices), gram.py, _ebmc.py (the
+               weight solve and the bootstrap), _halfset.py (the half-set
+               filter, folds, held-out cap), _moments.py, committor.py
+               (the callable), directions.py, metric.py
+  rates/       the {D_q, pi} pair: quantities.py, diffusion.py,
+               formulas.py, _coordinate.py (Profile and its reducers),
+               baselines.py, units.py
+  umbrella/    the umbrella-sampling estimators: dataset.py, reweight.py,
+               io.py, mdtraj_metric.py, rates.py (fit_and_rate)
+  tests/       one file per module, plus golden/ (frozen references)
 ```
 
-## Running the test suite
+The dependency order is `umbrella -> rates -> core`; a test rejects an
+import the other way.
+
+## Tests
 
 ```bash
-pytest lib/sliced_committor/tests -v
+JAX_PLATFORMS=cpu pytest sliced_committor/tests -q
 ```
 
-For coverage:
+The golden gates (`test_golden.py`, `test_halfset.py`) check the weights
+against references frozen from version 0.6.0 to the bit for the half-set
+filter and to `1e-13` for the scalar ridge; a change that moves them is a
+change of the published numbers and needs a reason in the changelog.
+`test_public_api.py` pins `__all__`; add a name there deliberately.
+`test_docs.py` executes every `python` code block of the README and the user
+docs in a namespace seeded with small synthetic inputs (`samples`, `in_A`,
+`in_B`, `points`, `q`, `trajectory`, `dt`, `lag`, `window_ids`, `s`,
+`s_traj`, `run_ids`, `D_s`, `g_s`, `dataset`, `w`), so a snippet that goes
+stale fails the suite. Mark a block that cannot run there (it needs files,
+mdtraj or matplotlib) with the info string ```` ```python skip ````.
+The pymbar and mdtraj paths are skipped without those packages; CI runs
+them in the `umbrella` job.
+
+## Lint
 
 ```bash
-pytest lib/sliced_committor/tests --cov=sliced_committor --cov-report=term-missing
+ruff check sliced_committor && ruff format --check sliced_committor
 ```
 
-The full suite includes validation tests against the 1D Ornstein-Uhlenbeck
-closed form and an inlined 2D Jacobi PDE solver; they take longer than the
-smoke tests. Filter with `pytest -k "not validation"` when iterating locally.
-
-## Lint and format
+## Docs
 
 ```bash
-ruff check lib/sliced_committor
-ruff format lib/sliced_committor
+make -C docs html
 ```
 
-Configuration lives in `lib/pyproject.toml` under `[tool.ruff]`.
+## Conventions
 
-## Building the docs
-
-```bash
-cd lib/docs
-make html
-```
-
-Output goes to `lib/docs/_build/html/`.
-
-## Style rules
-
-A few project-local conventions:
-
-1. **Float64 requirement.** EBMC / PESB / plain BMC require
-   `jax.config.update("jax_enable_x64", True)` before computing the result.
-   New code that touches the Gram solvers should check this at the public-API
-   boundary and raise a clear `ValueError` if missing.
-
-2. **No em dashes in committed text.** Replace `:`, `,`, `;`, or a period
-   depending on the cadence. A pre-commit hook rejects U+2014 in staged files.
-   The only exception is author-list-style separators (`Name : Affiliation`).
-
-3. **Type hints are mandatory on the public API.** Internal helpers can skip
-   them when the surrounding code makes the type obvious.
-
-4. **Docstrings on every public function in `__all__`.** Minimum is a one-line
-   summary, `Args`, and `Returns`. Add `Raises` and `Examples` when relevant.
-
-5. **No data files in the library.** The library is usage-focused: users bring
-   their own data. Examples must be self-contained (synthetic samples,
-   analytical references) and never require external downloads.
-
-6. **Tests should not depend on the main monorepo.** When porting an assertion
-   from `tests/` at the monorepo root, copy the math; do not import.
-
-## Submitting changes
-
-The remote does not exist yet; until it does, please share patches via email
-or by appending to the local monorepo. Once a public GitHub remote is set up,
-issue and PR templates will be added and this section will be expanded.
+1. Float64 is required for the weight solve; the public entry points raise
+   a clear `ValueError` without it.
+2. No em dashes in committed text (a pre-commit hook and a CI job reject
+   U+2014).
+3. Every public name has a docstring with the physics of what it computes,
+   its arguments and its return value, and appears in `docs/api/`.
+4. No data files in the library; examples and tests are self-contained.
+5. A silent fallback is an error: an argument that would be ignored raises.

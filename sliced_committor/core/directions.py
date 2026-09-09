@@ -31,7 +31,7 @@ from jax import jit, random
 class DirectionSamplingConfig(NamedTuple):
     """How :func:`~sliced_committor.compute_sliced_committor` draws its directions.
 
-    Fields:
+    Attributes:
         mode: ``'uniform'`` (default) or ``'lda'`` (the Fisher cone).
         lda_shrinkage: ridge on the pooled within-class covariance, as a
             fraction of ``trace / dim``.

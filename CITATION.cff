@@ -47,8 +47,8 @@ keywords:
   - sliced-methods
   - jax
 license: MIT
-version: 0.6.0
-date-released: "2026-08-03"
+version: 1.0.0
+date-released: "2026-09-09"
 
 # The canonical scientific reference. This is what GitHub's
 # "Cite this repository" button surfaces to citation managers.
