@@ -24,11 +24,9 @@ Every entry point here therefore returns a ``trace/d = 1`` normalised matrix, an
 Two caveats to that invariance, both measured and pinned in
 ``tests/test_metric_gram.py``:
 
-* ``tikhonov=('ridge_abs', lam)`` with a HAND-PICKED ``lam`` is an absolute ridge
-  and does not co-scale with G, so a literal carried over from a ``D = I``
-  calibration changes the answer by orders of magnitude. Machine-generated
-  ``ridge_abs`` values (the ``'cv'`` round-trip) are derived from the same G and
-  are safe.
+* a float ``tikhonov`` (an ABSOLUTE ridge) does not co-scale with G, so a
+  literal carried over from a ``D = I`` calibration changes the answer by
+  orders of magnitude.
 * ``tikhonov='halfset_eigen'`` is
   homogeneous of degree 1 on paper, but it reads a band correlation off the
   EIGENBASIS of the half-set Gram average, whose eigenvectors are ill-determined
@@ -60,10 +58,10 @@ which is all four blocks of ``S g S^T`` need, so the whole pass streams.
 
 Sign convention
 ---------------
-:class:`AngleSign` is REQUIRED and has no default. ``src.domains.aib9
-.compute_dihedral`` returns ``-phi_IUPAC`` despite a comment claiming the
-opposite, so the AIB9 (52-D) and villin (350-D) feature spaces carry the negated
-convention while chignolin's mdtraj-built 86-D space carries ``+phi_IUPAC``. A
+:class:`AngleSign` is REQUIRED and has no default. mdtraj's ``compute_phi`` /
+``compute_psi`` return ``+phi_IUPAC`` (chignolin's 86-D features); the AIB9
+(52-D) and villin (350-D) features of the paper were built with the negated
+convention. A
 mix-up flips every ``M[sin, cos]`` cross-block while leaving both diagonal blocks
 -- hence the trace, the eigenvalue spectrum and the condition number -- untouched,
 so no norm-based check can catch it. Only the reflection test can.
@@ -71,17 +69,15 @@ so no norm-based check can catch it. Only the reflection test can.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum
+from enum import IntEnum
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 __all__ = [
-    "M0Kind",
     "AngleSign",
     "MetricResult",
     "TorsionIncidence",
@@ -89,47 +85,21 @@ __all__ = [
     "gather_quads",
     "remap_quads",
     "build_torsion_incidence",
-    "torsion_g_matrix",
     "sincos_pullback_metric",
     "normalize_metric",
-    "shrink_metric",
     "metric_diagnostics",
-    "array_sha256",
 ]
-
-
-class M0Kind(str, Enum):
-    """Shape of the Cartesian diffusion tensor ``D_cart = D_c * M0``."""
-
-    IDENTITY = "identity"
-    """``M0 = I``. Every atom diffuses alike -- the natural choice in explicit
-    solvent, where a per-atom friction is not defined."""
-
-    INV_MASS = "inv_mass"
-    """``M0 = diag(1/m_a) (x) I_3``. Exact for uniform-friction Langevin, where
-    ``D_cart = (kT/gamma) diag(1/m_a)``."""
 
 
 class AngleSign(IntEnum):
     """Which dihedral convention the FEATURES were built in. No default."""
 
     IUPAC = 1
-    """``+phi_IUPAC``: mdtraj ``compute_phi``/``compute_psi``/..., hence
-    :func:`sliced_committor.workflows.featurize.dihedral_features` (chignolin)."""
+    """``+phi_IUPAC``: mdtraj ``compute_phi``/``compute_psi``/... (chignolin)."""
 
     SRC_NEGATED = -1
-    """``-phi_IUPAC``: ``src.domains.aib9.compute_dihedral`` and everything built
-    from it (AIB9 52-D, villin 350-D)."""
-
-
-def array_sha256(a) -> str:
-    """Stable content hash of an array, for cache keys."""
-    b = np.ascontiguousarray(np.asarray(a))
-    h = hashlib.sha256()
-    h.update(str(b.dtype).encode())
-    h.update(str(b.shape).encode())
-    h.update(b.tobytes())
-    return h.hexdigest()
+    """``-phi_IUPAC``: the convention of the paper's AIB9 (52-D) and villin
+    (350-D) features."""
 
 
 # ===========================================================================
@@ -280,18 +250,18 @@ def build_torsion_incidence(quad_local, n_atoms_local: int | None = None) -> Tor
 
     rows: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
     for a, slots in by_atom.items():
-        for i, k in slots:
-            for j, l in slots:
+        for i, ki in slots:
+            for j, kj in slots:
                 if i <= j:
-                    rows.setdefault((i, j), []).append((k, l, a))
+                    rows.setdefault((i, j), []).append((ki, kj, a))
 
     pairs = sorted(rows)
     pair_of_slot, gi_index, gj_index, atom = [], [], [], []
     for p, (i, j) in enumerate(pairs):
-        for k, l, a in rows[(i, j)]:
+        for ki, kj, a in rows[(i, j)]:
             pair_of_slot.append(p)
-            gi_index.append(i * 4 + k)
-            gj_index.append(j * 4 + l)
+            gi_index.append(i * 4 + ki)
+            gj_index.append(j * 4 + kj)
             atom.append(a)
 
     return TorsionIncidence(
@@ -302,37 +272,6 @@ def build_torsion_incidence(quad_local, n_atoms_local: int | None = None) -> Tor
         atom=np.asarray(atom, dtype=np.int32),
         n=n,
     )
-
-
-def torsion_g_matrix(grads, incidence: TorsionIncidence, m0_atom) -> jnp.ndarray:
-    """Dense ``(F, n, n)`` torsion metric ``g_ij = sum_a m0_a grad_a phi_i . grad_a phi_j``.
-
-    Provided for tests and diagnostics. :func:`sincos_pullback_metric` does NOT
-    call it -- it accumulates the four ``S g S^T`` moments per pair instead, so
-    the ``(F, n, n)`` tensor (48.7 GB at villin) is never built.
-    """
-    g_pair = _pair_g(jnp.asarray(grads), incidence, jnp.asarray(m0_atom))  # (F, P)
-    F = g_pair.shape[0]
-    n = incidence.n
-    i = jnp.asarray(incidence.pairs[:, 0], dtype=jnp.int32)
-    j = jnp.asarray(incidence.pairs[:, 1], dtype=jnp.int32)
-    g = jnp.zeros((F, n, n), dtype=g_pair.dtype)
-    g = g.at[:, i, j].set(g_pair)
-    return g.at[:, j, i].set(g_pair)
-
-
-def _pair_g(grads, incidence: TorsionIncidence, m0_atom) -> jnp.ndarray:
-    """``(F, P)`` values of ``g_ij`` on the shared-atom pairs only."""
-    F, n = grads.shape[0], grads.shape[1]
-    gflat = grads.reshape(F, n * 4, 3)
-    gi = gflat[:, jnp.asarray(incidence.gi_index, dtype=jnp.int32), :]  # (F, Q, 3)
-    gj = gflat[:, jnp.asarray(incidence.gj_index, dtype=jnp.int32), :]  # (F, Q, 3)
-    wa = jnp.asarray(m0_atom)[jnp.asarray(incidence.atom, dtype=jnp.int32)]  # (Q,)
-    dots = wa[None, :] * jnp.sum(gi * gj, axis=-1)  # (F, Q)
-    return jax.ops.segment_sum(
-        dots.T, jnp.asarray(incidence.pair_of_slot, dtype=jnp.int32),
-        num_segments=incidence.n_pairs,
-    ).T
 
 
 # ===========================================================================
@@ -366,12 +305,12 @@ def _make_moment_kernel(incidence: TorsionIncidence):
     n = incidence.n
 
     @jax.jit
-    def kernel(grads, angles, w, m0_atom):
+    def kernel(grads, angles, w, atom_w):
         F = grads.shape[0]
         gflat = grads.reshape(F, n * 4, 3)
         gi = gflat[:, gi_index, :]
         gj = gflat[:, gj_index, :]
-        dots = m0_atom[atom][None, :] * jnp.sum(gi * gj, axis=-1)  # (F, Q)
+        dots = atom_w[atom][None, :] * jnp.sum(gi * gj, axis=-1)  # (F, Q)
         g_pair = jax.ops.segment_sum(dots.T, seg, num_segments=n_pairs).T  # (F, P)
 
         s = jnp.sin(angles)
@@ -392,9 +331,9 @@ def _make_moment_kernel(incidence: TorsionIncidence):
 def sincos_pullback_metric(
     xyz_chunks: Iterable[np.ndarray],
     quad_local,
-    m0_atom,
     *,
     angle_sign: AngleSign,
+    atom_weights=None,
     weight_chunks: Iterable[np.ndarray] | None = None,
     incidence: TorsionIncidence | None = None,
     normalize: bool = True,
@@ -407,11 +346,11 @@ def sincos_pullback_metric(
         xyz_chunks: iterable yielding ``(F_c, A_local, 3)`` coordinate chunks, nm.
             Streamed; only the running moments are retained.
         quad_local: ``(n, 4)`` LOCAL atom indices (:func:`remap_quads`).
-        m0_atom: ``(A_local,)`` per-atom diffusion shape -- ``ones`` for
-            :attr:`M0Kind.IDENTITY`, ``1/m_a`` for :attr:`M0Kind.INV_MASS`.
-            NOT repeated three times; the contraction is over the Cartesian
-            component already.
         angle_sign: :class:`AngleSign`. Required.
+        atom_weights: optional ``(A_local,)`` per-atom diffusion shape
+            (``D_cart = D_c diag(atom_weights) (x) I_3``); None means every
+            atom diffuses alike, the natural choice in explicit solvent and
+            what the paper uses. Only the shape matters (the scale cancels).
         weight_chunks: optional iterable of ``(F_c,)`` unnormalised weights (MBAR).
             ``None`` means uniform. Must be aligned chunk-for-chunk with
             ``xyz_chunks``.
@@ -429,11 +368,16 @@ def sincos_pullback_metric(
     if inc.n != int(quad_local.shape[0]):
         raise ValueError(f"incidence.n={inc.n} does not match quad_local n={quad_local.shape[0]}")
     n = inc.n
-    m0 = jnp.asarray(np.asarray(m0_atom, dtype=dtype))
+    n_atoms = int(np.max(quad_local)) + 1
+    m0 = (
+        jnp.ones(n_atoms, dtype=dtype)
+        if atom_weights is None
+        else jnp.asarray(np.asarray(atom_weights, dtype=dtype))
+    )
     if m0.ndim != 1:
-        raise ValueError(f"m0_atom must be 1-D (A_local,); got shape {tuple(m0.shape)}")
+        raise ValueError(f"atom_weights must be 1-D (A_local,); got shape {tuple(m0.shape)}")
     if not np.all(np.isfinite(np.asarray(m0))) or float(np.min(np.asarray(m0))) <= 0.0:
-        raise ValueError("m0_atom must be finite and strictly positive.")
+        raise ValueError("atom_weights must be finite and strictly positive.")
 
     kernel = _make_moment_kernel(inc)
     quad_j = jnp.asarray(quad_local, dtype=jnp.int32)
@@ -491,7 +435,9 @@ def sincos_pullback_metric(
 
     raw_trace = float(np.trace(M))
     if not np.isfinite(raw_trace) or raw_trace <= 0.0:
-        raise ValueError(f"pulled-back metric has trace {raw_trace}; expected a positive finite value.")
+        raise ValueError(
+            f"pulled-back metric has trace {raw_trace}; expected a positive finite value."
+        )
     if normalize:
         M = normalize_metric(M)
 
@@ -519,19 +465,6 @@ def normalize_metric(M) -> np.ndarray:
     return A * (A.shape[0] / tr)
 
 
-def shrink_metric(M, lam: float) -> np.ndarray:
-    """``(1-lam) M + lam I`` on the trace-normalised ``M``.
-
-    A conditioning knob for feature maps whose pull-back is intrinsically
-    rank-deficient (pair distances). Unnecessary for the sin/cos peptides, whose
-    condition numbers sit in the 60-180 range.
-    """
-    if not 0.0 <= float(lam) <= 1.0:
-        raise ValueError(f"lam must be in [0, 1]; got {lam!r}")
-    A = normalize_metric(M)
-    return (1.0 - float(lam)) * A + float(lam) * np.eye(A.shape[0])
-
-
 def metric_diagnostics(M, *, n_torsions: int | None = None) -> dict:
     """Conditioning and block structure of a pulled-back metric.
 
@@ -551,12 +484,8 @@ def metric_diagnostics(M, *, n_torsions: int | None = None) -> dict:
         "rank_1e10": int(np.sum(lam > 1e-10 * max(lam_max, 1.0))),
         "n_small": int(np.sum(lam < 1e-6 * max(lam_max, 1.0))),
         "trace_over_d": float(np.trace(A) / d),
-        "symmetry_residual": float(
-            np.linalg.norm(A - A.T) / max(np.linalg.norm(A), 1e-300)
-        ),
-        "frob_rel_to_identity": float(
-            np.linalg.norm(A - np.eye(d)) / np.linalg.norm(np.eye(d))
-        ),
+        "symmetry_residual": float(np.linalg.norm(A - A.T) / max(np.linalg.norm(A), 1e-300)),
+        "frob_rel_to_identity": float(np.linalg.norm(A - np.eye(d)) / np.linalg.norm(np.eye(d))),
         "offdiag_frobenius_fraction": float(
             np.linalg.norm(A - np.diag(np.diag(A))) / max(np.linalg.norm(A), 1e-300)
         ),

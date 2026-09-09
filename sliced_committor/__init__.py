@@ -1,193 +1,88 @@
 """Sliced committor: sample-based committor approximation via 1D projections.
 
-Given samples and basin labels (`in_A`, `in_B`), compute the committor q(x)
-via random 1D projections + 1D reaction-diffusion solves + weighted
-recombination. The committor is returned as a callable JAX function ``q(x)``;
-because it is a pure function, ``jax.grad(q)`` (wrapped as ``committor_gradient``)
-gives the spatial gradient, and the rate computations build on it directly.
+Given samples and basin labels (``in_A``, ``in_B``), the committor ``q(x)`` (the
+probability of reaching B before A from ``x``) is built from many 1D
+reaction-diffusion committors along random directions, recombined with weights
+that minimise the Dirichlet form under the basin-moment constraints. The
+result is a callable JAX function, so ``jax.grad`` gives its gradient and the
+rate functionals build on it directly.
 
 Quickstart::
 
     import jax
-    jax.config.update("jax_enable_x64", True)   # required for EBMC weights
+    jax.config.update("jax_enable_x64", True)   # the weight solve needs float64
 
     from sliced_committor import fit_committor
-
-    # samples : (N, dim) array; in_A, in_B : (N,) bool basin labels
     q = fit_committor(samples, in_A=in_A, in_B=in_B, n_directions=256)
-    vals = q(points)                 # committor at arbitrary points
+    vals = q(points)
 
-Rates (build on the callable committor)::
+Rates::
 
-    from sliced_committor import dirichlet_rate, berezhkovskii_szabo_rate
-    rate = dirichlet_rate(q, samples, D=D)        # {nu_R, rho_A, rho_B, k_AB, k_BA}
+    from sliced_committor import committor_rate
+    rate = committor_rate(q, samples, trajectory=traj, dt=dt, lag=lag)
 
-Notes:
-    * No `beta` argument. The committor is β-invariant given fixed samples;
-      β goes in, β comes out, leaves no trace. Internally the library uses
-      β = 1 so that `result.free_energies` stores `-log ρ` directly.
-    * Basin labels are bool arrays, not callable state functions. Define
-      states however you want (clustering, RMSD thresholds, geometric
-      expressions) and pass the resulting masks.
+No ``beta`` argument: the committor is beta-invariant given the samples.
+Basin labels are bool arrays; define the states however you like.
 """
 
-from .core.solver import (
-    SlicedCommittorResult,
-    WeightingContext,
-    compute_basin_moment_weights,
-    compute_enriched_basin_moment_weights,
-    compute_enriched_basin_moment_weights_power,
-    compute_full_gram_weights,
-    compute_nitsche_weights,
-    compute_sliced_committor,
-    compute_weights_multi,
-    make_weighting_context,
-    summarize_gram_diagnostics,
-    why_masked,
-)
-
+from .core._ebmc import Bootstrap, RepresentationError, Weights, bootstrap_weights, solve_weights
 from .core.committor import (
     CommittorFit,
     build_committor,
-    committor_dirichlet_energy,
     committor_gradient,
     fit_committor,
+    rescale_transition,
 )
-
-from .core.sweep import SweepResult, sweep_committor
-
-from .core.weights import (
-    compute_epsilon,
-    compute_epsilon_equilibrium,
-    compute_epsilon_flux1d,
-    compute_epsilon_rms,
-    corrected_dirichlet_inv_rd,
-    full_gram_weights,
-    get_all_weight_functions,
-    get_default_weight_functions,
-)
-
-from .core._bmc_enriched import EnrichedBMCRepresentationError
-
 from .core.directions import (
     DirectionSamplingConfig,
     compute_lda_axis,
-    directions_gcpca,
-    directions_pca,
-    directions_tica_ema,
-    directions_tica_ema_decomposed,
     directions_uniform,
-    gcpca_basis,
-    pca_basis,
-    sample_directions,
     sample_power_spherical_mixture,
 )
-
-from .rates import (
-    BridgeD,
-    PlateauWindow,
-    Profile,
-    bayesian_smoluchowski_diffusion,
-    berezhkovskii_szabo_rate,
-    bootstrap_barrier_Ds,
-    committor_grad_profile,
-    committor_populations,
-    committor_rate,
-    conditional_mean,
-    constancy_reconstruction,
-    density,
-    diffusion_coefficient,
-    dirichlet_rate,
-    find_plateau,
-    flux_reductions,
-    hummer_Ds_profile,
-    kramers_rate,
-    mapped_committor_diffusion,
-    mapped_committor_diffusion_field,
-    mapped_committor_diffusion_reparam,
-    reactive_flux,
-    saddle_bridge_D,
-    tpt_rate,
-    value_at,
-)
+from .core.metric import AngleSign, sincos_pullback_metric
+from .core.solver import SlicedCommittorResult, compute_sliced_committor
+# RATES_IMPORT_PLACEHOLDER (Phase 2 restores this)
 
 __all__ = [
-    # Committor model (callable + one-shot fit)
+    # the committor
     "fit_committor",
     "build_committor",
     "committor_gradient",
-    "committor_dirichlet_energy",
+    "rescale_transition",
     "CommittorFit",
-    # Settings sweep (fit a grid of configs, keep the best by Dirichlet energy)
-    "sweep_committor",
-    "SweepResult",
-    # Solver internals (results + diagnostics)
     "compute_sliced_committor",
     "SlicedCommittorResult",
-    "WeightingContext",
-    "make_weighting_context",
-    # Weight solvers, ordered from recommended-default to specialised:
-    # enriched BMC (default), PESB-EBMC (higher-order softmix basis),
-    # plain BMC, full-Gram simplex, diagonal RD.
-    "compute_enriched_basin_moment_weights",
-    "compute_enriched_basin_moment_weights_power",
-    "compute_basin_moment_weights",
-    "compute_full_gram_weights",
-    "compute_nitsche_weights",
-    "corrected_dirichlet_inv_rd",
-    "full_gram_weights",
-    "EnrichedBMCRepresentationError",
-    "compute_weights_multi",
-    "get_all_weight_functions",
-    "get_default_weight_functions",
-    # Diagnostics
-    "why_masked",
-    "summarize_gram_diagnostics",
-    # Boundary-error estimators
-    "compute_epsilon_equilibrium",
-    "compute_epsilon_rms",
-    "compute_epsilon_flux1d",
-    "compute_epsilon",
-    # Directions
+    # the weights
+    "solve_weights",
+    "Weights",
+    "bootstrap_weights",
+    "Bootstrap",
+    "RepresentationError",
+    # directions
     "DirectionSamplingConfig",
-    "sample_directions",
-    "sample_power_spherical_mixture",
-    "compute_lda_axis",
     "directions_uniform",
-    "directions_tica_ema",
-    "directions_tica_ema_decomposed",
-    # Geometric basis factories (PCA, gcPCA):
-    "pca_basis",
-    "directions_pca",
-    "gcpca_basis",
-    "directions_gcpca",
-    # Rate quantities + formulas
+    "compute_lda_axis",
+    "sample_power_spherical_mixture",
+    # the feature-space metric
+    "sincos_pullback_metric",
+    "AngleSign",
+    # rates: the {D_q, pi} pair and its reductions
     "density",
-    "diffusion_coefficient",
-    "reactive_flux",
-    "saddle_bridge_D",
-    "mapped_committor_diffusion",
-    "BridgeD",
-    # Bridge v2 (position-dependent / regressed / uncertainty)
-    "mapped_committor_diffusion_field",
-    "mapped_committor_diffusion_reparam",
-    "committor_grad_profile",
-    "conditional_mean",
-    "flux_reductions",
-    "committor_populations",
-    "hummer_Ds_profile",
-    "constancy_reconstruction",
-    "bootstrap_barrier_Ds",
-    "bayesian_smoluchowski_diffusion",
-    "dirichlet_rate",
-    "berezhkovskii_szabo_rate",
+    "committor_grad_sq",
+    "basin_populations",
+    "diffusion_profile",
+    "lag_scan",
+    "hummer_diffusion",
+    "pooled_acf_diffusion",
+    "committor_diffusion_from_cv",
+    "committor_diffusion_from_cv_reparam",
+    "linear_response_grad_sq",
     "committor_rate",
-    "tpt_rate",
-    "kramers_rate",
+    "rate_from_profiles",
     "Profile",
     "value_at",
     "find_plateau",
     "PlateauWindow",
 ]
 
-__version__ = "0.6.0"
+__version__ = "1.0.0"

@@ -1,506 +1,159 @@
 """The committor as a callable JAX function.
 
-The sliced committor is just a pure function ``q(x) -> committor``: project x
-onto each direction, interpolate the 1D slice committors, recombine with the
-solved weights. Expressing it as a closure makes it the single, intuitive
-object a user works with -- and because it is a plain JAX function,
-``jax.grad(q)`` (wrapped as :func:`committor_gradient`) yields the spatial
-gradient ``∇q`` for free.
-
-Two entry points:
-
-* :func:`fit_committor` -- one shot: samples + basin labels in, callable out.
-* :func:`build_committor` -- from an already-computed result + weights.
-
-The recombination here is a direct (autodiff-friendly) linear/centered/
-smoothstep sum that reproduces the solver's evaluation to float64 precision;
-it deliberately avoids the log-space normalisation path so the gradient is
-numerically clean.
+``q(x) = c + sum_j w_j q_j(theta_j . x)``: project ``x`` onto each direction,
+interpolate the 1D slice committors, recombine with the solved weights. As a
+pure JAX function it differentiates, so :func:`committor_gradient` is
+``jax.grad``. Two entry points: :func:`fit_committor` (samples and labels in,
+callable out) and :func:`build_committor` (from a slice basis and weights).
 """
 
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from jax import jit
 
-from .solver import (
-    SlicedCommittorResult,
-    _apply_boundary_conditions,
-    _evaluate_centered_from_qall,
-    _evaluate_powered_smoothstep_from_qall,
-    _qall_onthefly,
-    compute_basin_moment_weights,
-    compute_enriched_basin_moment_weights,
-    compute_enriched_basin_moment_weights_power,
-    compute_full_gram_weights,
-    compute_nitsche_weights,
-    compute_sliced_committor,
-    compute_weights_multi,
-)
-from .gram import metric_diagonal
-from .weights import corrected_dirichlet_inv_rd
-
-Weights = jnp.ndarray | dict
+from ._ebmc import Weights, solve_weights
+from .solver import SlicedCommittorResult, _qall_onthefly, compute_sliced_committor
 
 
 class CommittorFit(NamedTuple):
-    """Bundle returned by :func:`fit_committor` when ``return_details=True``.
-
-    ``committor`` is the callable ``q(x)``; ``result`` and ``weights`` are the
-    underlying :class:`SlicedCommittorResult` and weight array/dict, kept for
-    diagnostics (``result.summary()``, ``why_masked``,
-    ``summarize_gram_diagnostics``). ``dirichlet_energy`` is the variational
-    objective 𝓓[q̂] of the recombined committor (see
-    :func:`committor_dirichlet_energy`), a label-free relative quality ranker
-    (lower = closer to the true committor). Anything else a caller might want
-    (per-sample committor, masked-slice reasons) is derivable from ``result``.
-    """
+    """What :func:`fit_committor` returns with ``return_details=True``: the
+    callable, the slice basis and the solved :class:`Weights`."""
 
     committor: Callable
     result: SlicedCommittorResult
     weights: Weights
-    dirichlet_energy: float | None = None
+
+    @property
+    def dirichlet_energy(self) -> float:
+        """The variational objective ``w^T G w`` of this fit (lower is better)."""
+        return self.weights.dirichlet_energy
 
 
-# Weight-solver registry for the ``weights=`` string shortcut in fit_committor.
-_WEIGHT_SOLVERS = {
-    "ebmc": compute_enriched_basin_moment_weights,
-    "pesb": compute_enriched_basin_moment_weights_power,
-    "bmc": compute_basin_moment_weights,
-    "full_gram": compute_full_gram_weights,
-    "nitsche": compute_nitsche_weights,
-}
-_DIAGONAL_ALIASES = {"diagonal", "corrected_dirichlet_inv_rd", "rd"}
-
-
-def _resolve_combiner(weights: Weights):
-    """Resolve a weight array/dict into ``(kind, payload)`` for recombination.
-
-    Classifies the weights into the recombination ansatz, in precedence order:
-    PESB smoothstep > centered-basis (EBMC) > plain array. The array path uses
-    the linear normalised combiner ``(Σ wⱼ qⱼ) / Σ wⱼ``, which equals the
-    solver's signed-logsumexp evaluator up to floating-point round-off.
-    """
-    if isinstance(weights, dict):
-        if "w_by_power" in weights and "n_values" in weights:
-            return "pesb", (
-                jnp.asarray(weights["w_by_power"]),
-                jnp.asarray(weights["n_values"]),
-                float(weights.get("c", 0.0)),
-            )
-        if "c" in weights or weights.get("q_bar") is not None:
-            w = jnp.asarray(weights["w"])
-            qb = weights.get("q_bar")
-            q_bar = jnp.asarray(qb) if qb is not None else jnp.zeros_like(w)
-            return "centered", (w, float(weights.get("c", 0.0)), q_bar)
-        if "w" in weights:
-            return "array", jnp.asarray(weights["w"])
-        if "sign_w" in weights and "log_abs_w" in weights:
-            w = jnp.asarray(weights["sign_w"]) * jnp.exp(jnp.asarray(weights["log_abs_w"]))
-            return "array", w
-        raise ValueError(
-            "weights dict missing recognised keys; expected one of "
-            "'w', 'c'/'q_bar', 'w_by_power'+'n_values', or 'sign_w'+'log_abs_w'."
-        )
-    return "array", jnp.asarray(weights)
-
-
-def _energy_basis(weights) -> str:
-    """Which formula :func:`committor_dirichlet_energy` uses for these weights.
-
-    ``"gram"`` for the Gram-family solvers (a dict carrying ``G``: ebmc / pesb /
-    bmc / full_gram), whose energy is the true ``wᵀG w``; ``"diagonal"`` for the
-    diagonal RD / bare-array solver, whose energy is the smaller-scale diagonal
-    approximation. Ranking the ``"dirichlet"`` energy across the two is not
-    valid. Shared by :func:`committor_dirichlet_energy` and the sweep selector.
-    """
-    return "gram" if isinstance(weights, dict) and "G" in weights else "diagonal"
+@partial(jit, static_argnames=("original_shape",))
+def _combine(q_all, w, c, valid_mask, original_shape):
+    """``c + sum_j w_j clip(q_j(x))`` over the valid slices."""
+    w_eff = w * valid_mask.astype(w.dtype)
+    q_clip = jnp.clip(q_all, 0.0, 1.0)
+    return (c + jnp.sum(w_eff[:, None] * q_clip, axis=0)).reshape(original_shape)
 
 
 def build_committor(
-    result: SlicedCommittorResult,
-    weights: Weights,
-    *,
-    clip: bool = True,
-    enforce_boundary_conditions: bool = True,
-    rescale_transition: bool = False,
+    result: SlicedCommittorResult, weights: Weights, *, clip: bool = True
 ) -> Callable:
-    """Build the callable committor ``q(points, *, in_A=None, in_B=None)``.
+    """The callable committor ``q(points, *, in_A=None, in_B=None)``.
 
-    Args:
-        result: a :class:`SlicedCommittorResult` from
-            :func:`compute_sliced_committor`.
-        weights: a ``(M,)`` array or a weight-solver dict (raw ``w``,
-            centered-basis EBMC, PESB smoothstep, or signed log-space). The
-            form is resolved once here, so the returned closure is monomorphic
-            (jittable and differentiable).
-        clip: clip the output to ``[0, 1]`` (default True).
-        enforce_boundary_conditions: when True (default) and the caller passes
-            ``in_A`` / ``in_B`` masks for the query points, snap those points to
-            q=0 / q=1. The gradient path (no masks) is never snapped.
-        rescale_transition: affine-rescale the non-basin region to span
-            ``[0, 1]`` before snapping (only with boundary masks).
-
-    Returns:
-        ``committor``: a function mapping ``(P, dim)`` -> ``(P,)`` (or a single
-        ``(dim,)`` point -> scalar). Pure, jittable, and differentiable via
-        :func:`committor_gradient` / ``jax.grad``.
+    A pure function of the points: ``(P, dim) -> (P,)`` (a single ``(dim,)``
+    point gives a scalar), clipped to ``[0, 1]`` unless ``clip=False``. Passing
+    basin masks for the points snaps them to ``q = 0`` in A and ``q = 1`` in B;
+    the gradient path never snaps. For a display-ready field see
+    :func:`rescale_transition`.
     """
     directions = result.directions
     s_coords = result.slice_coords
     q_1d = jnp.where(jnp.isnan(result.committors_1d), 0.0, result.committors_1d)
-    valid = result.valid_mask
-    kind, payload = _resolve_combiner(weights)
-
-    def _q_bar(points_flat, original_shape):
-        q_all = _qall_onthefly(directions, s_coords, q_1d, points_flat)  # (M, P)
-        if kind == "array":
-            w = payload
-            w_eff = w * valid.astype(w.dtype)
-            Z = jnp.sum(w_eff)
-            Z_safe = jnp.where(jnp.abs(Z) > 0, Z, 1.0)
-            return ((w_eff @ q_all) / Z_safe).reshape(original_shape)
-        if kind == "centered":
-            w, c, q_bar_off = payload
-            return _evaluate_centered_from_qall(q_all, w, c, q_bar_off, valid, original_shape)
-        w_by_power, n_values, c = payload
-        return _evaluate_powered_smoothstep_from_qall(
-            q_all, w_by_power, n_values, c, valid, original_shape
-        )
+    valid = jnp.asarray(result.valid_mask)
+    w = jnp.asarray(weights.w)
+    c = float(weights.c)
 
     def committor(points, *, in_A=None, in_B=None):
         points = jnp.asarray(points)
         original_shape = points.shape[:-1]
         points_flat = points.reshape(-1, points.shape[-1])
-        q_res = _q_bar(points_flat, original_shape)
+        q = _combine(
+            _qall_onthefly(directions, s_coords, q_1d, points_flat), w, c, valid, original_shape
+        )
         if clip:
-            q_res = jnp.clip(q_res, 0.0, 1.0)
-        if enforce_boundary_conditions and (in_A is not None or in_B is not None):
-            q_res = _apply_boundary_conditions(
-                q_res, in_A, in_B, original_shape, rescale_transition
-            )
-        return q_res
+            q = jnp.clip(q, 0.0, 1.0)
+        if in_A is not None:
+            q = jnp.where(jnp.asarray(in_A).reshape(original_shape), 0.0, q)
+        if in_B is not None:
+            q = jnp.where(jnp.asarray(in_B).reshape(original_shape), 1.0, q)
+        return q
 
     return committor
 
 
-def committor_gradient(committor: Callable, points: jnp.ndarray) -> jnp.ndarray:
-    """Spatial gradient ``∇q(x)`` of a callable committor via autodiff.
+def rescale_transition(q, in_A, in_B):
+    """Affine-rescale the transition region of an evaluated field to span ``[0, 1]``.
 
-    Differentiates the *smooth* committor (no boundary snapping): autodiff
-    through the piecewise-linear slice interpolation reproduces the analytic
-    slice slope ``∂q/∂s = Δq/Δs``, so ``∇q = Σ_m w_m q'_m(θ_m·x) θ_m``.
+    A weighted average of slice committors can compress the range between the
+    basins. This maps the non-basin values of ``q`` to ``[0, 1]`` by their
+    minimum and maximum over the batch, then snaps A to 0 and B to 1. It is a
+    property of the batch, not of the committor function, which is why it is
+    a post-processing step and not an option of the callable.
+    """
+    q = jnp.asarray(q)
+    mask_A = jnp.asarray(in_A).reshape(q.shape)
+    mask_B = jnp.asarray(in_B).reshape(q.shape)
+    in_transition = ~mask_A & ~mask_B
+    q_trans = jnp.where(in_transition, q, jnp.nan)
+    q_min = jnp.nanmin(q_trans)
+    span = jnp.maximum(jnp.nanmax(q_trans) - q_min, 1e-10)
+    q = jnp.where(in_transition, (q - q_min) / span, q)
+    q = jnp.where(mask_A, 0.0, q)
+    return jnp.where(mask_B, 1.0, q)
 
-    Args:
-        committor: a callable from :func:`build_committor` / :func:`fit_committor`.
-        points: ``(P, dim)`` (or a single ``(dim,)`` point).
 
-    Returns:
-        ``(P, dim)`` gradients (or ``(dim,)`` for a single point).
+def committor_gradient(committor: Callable, points) -> jnp.ndarray:
+    """``grad q(x)`` by autodiff; ``(P, dim)`` for ``(P, dim)`` points.
+
+    Differentiates the smooth committor (no snapping). Autodiff through the
+    piecewise-linear slice interpolation gives the analytic slice slope, so
+    ``grad q = sum_j w_j q_j'(theta_j . x) theta_j``.
     """
     points = jnp.asarray(points)
     dim = points.shape[-1]
     original_shape = points.shape[:-1]
-    points_flat = points.reshape(-1, dim)
-
-    def _scalar_q(x):
-        return committor(x)
-
-    grads = jax.vmap(jax.grad(_scalar_q))(points_flat)  # (P, dim)
+    grads = jax.vmap(jax.grad(lambda x: committor(x)))(points.reshape(-1, dim))
     return grads.reshape((*original_shape, dim))
 
 
-def committor_dirichlet_energy(
-    result: SlicedCommittorResult,
-    weights: Weights,
-    *,
-    mode: str = "auto",
-) -> float:
-    """Dirichlet energy 𝓓[q̂] = ∫ (∇q̂)ᵀ D ∇q̂ ρ of the recombined committor.
-
-    This is the variational objective the weight solve minimises, expressed in
-    slice space as the quadratic form ``wᵀG w`` (the RD / β=1, D=1 convention).
-    By the variational principle a lower value is closer to the true committor,
-    so it is a label-free *relative* quality ranker for model selection. It
-    needs no diffusion D, no lag, and no trajectory: it is the static
-    ``<D|∇q̄|²>`` object, distinct from the rate-calibrated config-space
-    :func:`~sliced_committor.rates.dirichlet_rate`.
-
-    The energy is the *physical* gradient energy ``wᵀG w`` (the true
-    ``∫(∇q̂)²ρ``), computed consistently with :func:`build_committor`'s combiner
-    so it is the energy of the committor actually built. It deliberately
-    excludes the solver's Tikhonov ridge, so it is comparable across the
-    Gram-family solvers (ebmc / pesb / bmc / full_gram all share the same Gram):
-
-    * EBMC / PESB (centered / smoothstep ansatz): ``wᵀG w``. For EBMC the ansatz
-      is ``c + Σ_j w_j q_j`` against the ``(M, M)`` Gram; for PESB it is
-      ``c + Σ_{j,k} w_{j,k} Ψ_k(q_j)`` against the ``(M·P, M·P)`` Kronecker-lifted
-      augmented Gram, with ``w`` the flattened ``(M·P,)`` weight vector. (The
-      solver's reported ``optimal_dirichlet_energy = 1/M_gap`` is the
-      *regularised* metric ``wᵀ(G+ηI)w`` and differs by the small ridge term.)
-    * full_gram / bmc (normalised array combiner ``(Σ w_j q_j)/Σw``):
-      ``w̃ᵀG w̃`` with the same effective weights ``w̃ = w·valid / Σ(w·valid)``.
-    * diagonal / raw ``(M,)`` array (no Gram returned): the diagonal
-      approximation ``Σ_j w̃_j² D_j^RD`` from ``result.log_dirichlet`` (the
-      diagonal solver's own model; off-diagonal coupling and the per-slice
-      relative normalisation are not captured, so it is only loosely comparable
-      to the Gram-family energies).
-
-    Args:
-        result: the :class:`SlicedCommittorResult` from the fit.
-        weights: the weight array/dict returned by the weight solver.
-        mode: ``"auto"`` (default: Gram form when available, else the diagonal
-            fallback), ``"gram"`` (require a Gram / reported energy; raise if
-            absent), or ``"diagonal"`` (always use the ``log_dirichlet`` form).
-
-    Returns:
-        the Dirichlet energy as a float (0.0 if no valid slice contributes).
-    """
-    if mode not in ("auto", "gram", "diagonal"):
-        raise ValueError(f"mode must be 'auto', 'gram', or 'diagonal'; got {mode!r}.")
-
-    valid = jnp.asarray(result.valid_mask)
-    kind, payload = _resolve_combiner(weights)
-    G = weights["G"] if _energy_basis(weights) == "gram" else None
-
-    # Effective combination weights, matching build_committor exactly. Invalid
-    # slices are masked out so the energy is the gradient energy of the committor
-    # actually built (idempotent for the library solvers, whose w is already
-    # valid-masked; the guard makes the contract hold for hand-built dicts too).
-    if kind == "centered":
-        w = jnp.asarray(payload[0])  # constant bias drops from the gradient
-        w_eff = w * valid.astype(w.dtype)
-    elif kind == "pesb":
-        wbp = jnp.asarray(payload[0])  # (M, P) enriched weights
-        w_eff = (wbp * valid.astype(wbp.dtype)[:, None]).reshape(-1)  # (M*P,)
-    else:  # "array": full_gram / bmc / diagonal -> normalised combiner
-        w = jnp.asarray(payload)
-        w_eff = w * valid.astype(w.dtype)
-        Z = jnp.sum(w_eff)
-        Z_safe = jnp.where(jnp.abs(Z) > 0, Z, 1.0)
-        w_eff = w_eff / Z_safe
-
-    # Physical gradient energy wᵀG w (excludes the solver's Tikhonov ridge).
-    if mode != "diagonal" and G is not None:
-        Gm = jnp.asarray(G)
-        return float(w_eff @ (Gm @ w_eff))
-
-    if mode == "gram":
-        raise ValueError(
-            "mode='gram' requires the weight solver to return a Gram matrix 'G' "
-            "(ebmc/pesb/bmc/full_gram); got a bare weight array. Use mode='auto' "
-            "or 'diagonal'."
-        )
-
-    # Diagonal fallback: Σ_j w̃_j² D_j^RD from per-slice log Dirichlet energy.
-    if kind != "array":
-        raise ValueError(
-            f"the {kind!r} ansatz needs its Gram matrix; the diagonal fallback "
-            "applies only to the array combiner."
-        )
-    if result.log_dirichlet is None:
-        raise ValueError(
-            "diagonal Dirichlet energy needs result.log_dirichlet, which is None. "
-            "Recompute the sliced committor (it is populated by default)."
-        )
-    log_D = jnp.asarray(result.log_dirichlet)
-    # Contribute only finite-energy, non-zero-weight slices. Masked slices carry
-    # log_D = +inf; guarding the product (not just D_j) also avoids the
-    # 0 * exp(huge) -> NaN that a zero-weight slice with an overflowing log_D
-    # would otherwise poison the sum with.
-    contributes = jnp.isfinite(log_D) & (w_eff != 0)
-    safe_log_D = jnp.where(contributes, log_D, 0.0)
-    term = jnp.where(contributes, (w_eff**2) * jnp.exp(safe_log_D), 0.0)
-    # Under a feature-space metric the per-slice energy is d_j INT rho (dq/ds)^2.
-    # The Gram branch above gets this from G; the diagonal fallback must add it.
-    d_j = metric_diagonal(result.directions, result.feature_metric)
-    if d_j is not None:
-        term = term * d_j
-    return float(jnp.sum(term))
-
-
-def _solve_weights(result, samples, weights, weight_kwargs):
-    """Resolve the ``weights=`` argument of fit_committor to an array/dict."""
-    if isinstance(weights, str):
-        key = weights.lower()
-        if key in _DIAGONAL_ALIASES:
-            return compute_weights_multi(result, [corrected_dirichlet_inv_rd], samples=samples)[
-                "corrected_dirichlet_inv_rd"
-            ]
-        if key not in _WEIGHT_SOLVERS:
-            choices = sorted([*_WEIGHT_SOLVERS, "diagonal"])
-            raise ValueError(
-                f"unknown weights={weights!r}; choose from {choices} "
-                "or pass a precomputed array/dict or a callable(result, samples)."
-            )
-        return _WEIGHT_SOLVERS[key](result, samples, **weight_kwargs)
-    if callable(weights):
-        return weights(result, samples, **weight_kwargs)
-    return weights  # precomputed array or dict
-
-
-def _cv_refit_ridge(samples, in_A, in_B, n_directions, seed, solver_kwargs, weights, weight_kwargs):
-    """Absolute ridge from K-fold CV with the BASIS REBUILT on each training set.
-
-    For each fold: fit a fresh sliced committor on the training samples, assemble
-    ``(G, a, b)`` on train and on the held-out fold with that basis, and score the
-    held-out cap ``w'G_te w / ((b_te - a_te)'w)^2`` along an absolute-ridge grid.
-    The selection is the bare argmin of the mean held-out cap, the same rule
-    ``tikhonov='cv'`` uses.
-
-    See ``docs/ridge_rule.md`` Sec. 7 for the measurement that motivates it, and
-    Sec. 7b for why neither rule applies a 1-SE tie-break.
-    """
-    import numpy as np
-
-    from ._bmc import compute_basin_moments
-    from ._ridge_cv import (
-        DEFAULT_N_FOLDS,
-        DEFAULT_N_RIDGE,
-        RIDGE_HI,
-        RIDGE_LO,
-        make_folds,
-    )
-    from .gram import _assemble_gram_matrix, _compute_derivative_matrix, resolve_cos_matrix
-    from .solver import make_weighting_context
-
-    X = np.asarray(samples)
-    N = X.shape[0]
-    inA, inB = np.asarray(in_A, bool), np.asarray(in_B, bool)
-    strata = np.where(inA, 0, np.where(inB, 1, 2))
-    fold_of = make_folds(N, DEFAULT_N_FOLDS, contiguous=True, strata=strata)
-
-    def assemble(res, idx):
-        """(G, a, b) for the basis in ``res``, evaluated at ``samples[idx]``."""
-        ctx = make_weighting_context(res)
-        proj = ctx.directions @ jnp.asarray(X[idx]).T
-        sub = ctx._replace(
-            projected_samples=proj,
-            in_A=jnp.asarray(inA[idx]),
-            in_B=jnp.asarray(inB[idx]),
-            sample_weights=None,
-        )
-        F = _compute_derivative_matrix(sub, proj)
-        cos = resolve_cos_matrix(ctx)
-        G = _assemble_gram_matrix(F.astype(jnp.float64), jnp.full(len(idx), 1.0 / len(idx)), cos)
-        a, b = compute_basin_moments(sub)
-        return np.asarray(G, np.float64), np.asarray(a), np.asarray(b)
-
-    caps = None
-    grid = None
-    for k in range(DEFAULT_N_FOLDS):
-        te = np.flatnonzero(fold_of == k)
-        tr = np.flatnonzero(fold_of != k)
-        res_k = compute_sliced_committor(
-            jnp.asarray(X[tr]),
-            in_A=jnp.asarray(inA[tr]),
-            in_B=jnp.asarray(inB[tr]),
-            n_directions=n_directions,
-            seed=seed,
-            **solver_kwargs,
-        )
-        Gtr, atr, btr = assemble(res_k, tr)
-        Gte, ate, bte = assemble(res_k, te)
-        keep = np.asarray(res_k.valid_mask, bool)
-        idx = np.flatnonzero(keep)
-        if grid is None:
-            anchor = len(idx) * float(np.mean(np.diag(Gtr[np.ix_(idx, idx)])))
-            grid = np.geomspace(RIDGE_LO * anchor, RIDGE_HI * anchor, DEFAULT_N_RIDGE)
-            caps = np.full((DEFAULT_N_FOLDS, DEFAULT_N_RIDGE), np.nan)
-        Gs = Gtr[np.ix_(idx, idx)]
-        L, V = np.linalg.eigh(0.5 * (Gs + Gs.T))
-        L = np.maximum(L, 0.0)
-        dv = V.T @ (btr[idx] - atr[idx])
-        Gte_s, dte = Gte[np.ix_(idx, idx)], (bte - ate)[idx]
-        for i, r in enumerate(grid):
-            s = float(dv @ (dv / (L + r)))
-            if not np.isfinite(s) or s <= 0:
-                continue
-            w = (V @ (dv / (L + r))) / s
-            gap = float(dte @ w)
-            if abs(gap) > 1e-30:
-                caps[k, i] = float(w @ Gte_s @ w) / gap**2
-        del res_k, Gtr, Gte
-
-    with np.errstate(invalid="ignore"):
-        mean = np.nanmean(caps, axis=0)
-    if not np.isfinite(mean).any():
-        raise ValueError("cv_refit: the held-out cap is undefined at every ridge.")
-    scored = np.where(np.isfinite(mean), mean, np.inf)
-    # Bare argmin, matching ``select_ridge_cv``'s ``one_se=False`` default.  This
-    # used to apply the paired 1-SE tie-break; it must not.  The tie-break looked
-    # free because it equalled the argmin on all 22 benchmark configurations, but
-    # a flat cap curve admits an arbitrarily large "free" move: on the paper's 2D
-    # schematic (M=256, n_min=1, equal_width) the curve is flat to 0.88% over a
-    # band where the density-masked grid RMSE moves 15%, and the tie-break walked
-    # three grid points for +15.1%.  ``cv_refit`` is the remedy aimed at exactly
-    # those under-resolved histograms, so it is the last place that walk belongs.
-    return float(grid[int(np.argmin(scored))])
-
-
 def fit_committor(
-    samples: jnp.ndarray,
+    samples,
     *,
-    in_A: jnp.ndarray,
-    in_B: jnp.ndarray,
-    weights: str | Weights | Callable = "ebmc",
+    in_A,
+    in_B,
     n_directions: int = 256,
-    return_details: bool = False,
     seed: int = 42,
-    weight_kwargs: dict | None = None,
-    build_kwargs: dict | None = None,
-    **solver_kwargs: Any,
+    tikhonov="halfset_eigen",
+    heldout_cap: bool = False,
+    return_details: bool = False,
+    **solver_kwargs,
 ):
     """Fit a sliced committor in one call and return the callable ``q(x)``.
 
-    Wraps :func:`compute_sliced_committor` + a weight solve +
-    :func:`build_committor`. The internals (the result, the weights) are hidden
-    by default; pass ``return_details=True`` to get them back for diagnostics.
+    :func:`compute_sliced_committor` (the slice basis), :func:`solve_weights`
+    (the weights) and :func:`build_committor` (the callable), in that order.
 
     Args:
         samples: ``(N, dim)`` configurations.
-        in_A, in_B: ``(N,)`` bool basin-membership masks.
-        weights: which weight solver to use. A string
-            (``"ebmc"`` default, ``"pesb"``, ``"bmc"``, ``"full_gram"``,
-            ``"diagonal"``), a callable ``solver(result, samples, **weight_kwargs)``,
-            or a precomputed weight array/dict.
-        n_directions: number of projection directions.
-        return_details: if True, return ``(q, CommittorFit)`` instead of ``q``.
-        seed: random seed for direction sampling.
-        weight_kwargs: extra kwargs forwarded to the weight solver.
-        build_kwargs: extra kwargs forwarded to :func:`build_committor`
-            (e.g. ``enforce_boundary_conditions``, ``clip``).
-        **solver_kwargs: extra kwargs forwarded to
-            :func:`compute_sliced_committor` (e.g. ``n_bins``, ``rd_kappa``,
-            ``boundary_quantile``, ``sample_weights``, ``directions``).
-
-    Returns:
-        ``q`` (callable) by default, or ``(q, CommittorFit)`` when
-        ``return_details=True``.
+        in_A, in_B: ``(N,)`` bool basin labels.
+        n_directions: number of slices ``M``.
+        seed: PRNG seed for the direction draw.
+        tikhonov: ``'halfset_eigen'`` (default) | ``'auto'`` | absolute ridge.
+        heldout_cap: also read the out-of-sample Dirichlet cap
+            (``fit.weights.heldout_cap``), for ranking settings without a
+            reference committor.
+        return_details: return ``(q, CommittorFit)`` instead of ``q``.
+        **solver_kwargs: forwarded to :func:`compute_sliced_committor`
+            (``n_bins``, ``binning_method``, ``boundary_quantile``,
+            ``sample_weights``, ``directions``, ``direction_sampling``,
+            ``feature_metric``, ...).
     """
-    samples = jnp.asarray(samples)
     result = compute_sliced_committor(
-        samples, in_A=in_A, in_B=in_B, n_directions=n_directions, seed=seed, **solver_kwargs
+        jnp.asarray(samples),
+        in_A=in_A,
+        in_B=in_B,
+        n_directions=n_directions,
+        seed=seed,
+        **solver_kwargs,
     )
-    weight_kwargs = dict(weight_kwargs or {})
-    if weight_kwargs.get("tikhonov") == "cv_refit":
-        # cv_refit has to live here, not in the weight solver: it rebuilds the
-        # 1D slice BASIS on each training fold, and the solver only ever sees an
-        # already-fitted basis.  That is the whole point -- 'cv' shares one basis
-        # across folds and is therefore blind to binning noise, which is what
-        # makes it under-shrink when the histograms are under-resolved (2D,
-        # n_min=1: 1.6-1.9x the oracle, against 1.00-1.03x for cv_refit).
-        # Costs K basis builds; the assembly stays ~1x because folds partition.
-        weight_kwargs["tikhonov"] = (
-            "ridge_abs",
-            _cv_refit_ridge(
-                samples, in_A, in_B, n_directions, seed, solver_kwargs, weights, weight_kwargs
-            ),
-        )
-    w = _solve_weights(result, samples, weights, weight_kwargs)
-    q = build_committor(result, w, **(build_kwargs or {}))
+    weights = solve_weights(result, tikhonov=tikhonov, heldout_cap=heldout_cap)
+    q = build_committor(result, weights)
     if return_details:
-        energy = committor_dirichlet_energy(result, w)
-        return q, CommittorFit(committor=q, result=result, weights=w, dirichlet_energy=energy)
+        return q, CommittorFit(committor=q, result=result, weights=weights)
     return q
