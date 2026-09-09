@@ -46,6 +46,7 @@ import jax.numpy as jnp
 from jax import jit, lax, random, vmap
 
 from ._internal import sample_random_directions, signed_logsumexp, to_log_abs_sign
+from .gram import cos_matrix_from_metric, validate_feature_metric
 from .directions import DirectionSamplingConfig, sample_directions
 
 # =============================================================================
@@ -70,6 +71,7 @@ class SlicedCommittorResult(NamedTuple):
     sample_weights: jnp.ndarray | None = None  # (N,) optional non-uniform weights
     axis: jnp.ndarray | None = None  # (dim,) LDA axis if direction_sampling.mode='lda'
     lda_info: dict | None = None  # LDA diagnostics dict
+    feature_metric: jnp.ndarray | None = None  # (dim, dim) Mbar; None = D = I
 
     def summary(self) -> str:
         """Human-readable diagnostic summary of the result.
@@ -258,9 +260,12 @@ class WeightingContext(NamedTuple):
             path inside :func:`compute_sliced_committor`.
         boundary_errors: (M,) cached equilibrium ε. Reused by
             :func:`full_gram_weights` when ``epsilon_fn`` is None.
-        cos_matrix: (M, M) direction cosines; populated when slice
-            correlations are requested.
+        cos_matrix: (M, M) of theta_j^T D theta_k; always populated by
+            :func:`make_weighting_context`, carrying ``feature_metric`` when set.
         sample_weights: (N,) reweighting (e.g. MBAR). None means uniform 1/N.
+        feature_metric: (dim, dim) feature-space diffusion tensor Mbar, or
+            None for the D = I default. Only the SHAPE matters -- the weight
+            solve is invariant under Mbar -> c Mbar.
     """
 
     directions: jnp.ndarray
@@ -279,6 +284,7 @@ class WeightingContext(NamedTuple):
     boundary_errors: jnp.ndarray | None = None
     cos_matrix: jnp.ndarray | None = None
     sample_weights: jnp.ndarray | None = None
+    feature_metric: jnp.ndarray | None = None
 
 
 # =============================================================================
@@ -935,6 +941,7 @@ def compute_sliced_committor(
     sample_weights: jnp.ndarray | None = None,
     directions: jnp.ndarray | None = None,
     direction_sampling: DirectionSamplingConfig | None = None,
+    feature_metric: jnp.ndarray | None = None,
 ) -> SlicedCommittorResult:
     """
     Compute sliced committor approximation from samples.
@@ -974,6 +981,15 @@ def compute_sliced_committor(
         direction_sampling: ``DirectionSamplingConfig`` for biased samplers
             (LDA / power-spherical mixture). Ignored if ``directions`` is
             also passed.
+        feature_metric: (dim, dim) feature-space diffusion tensor Mbar, so the
+            Dirichlet form is ``INT rho (grad q)^T Mbar (grad q)`` instead of
+            the ``Mbar = I`` default. Build it with
+            :func:`sliced_committor.core.metric.sincos_pullback_metric`. Only
+            the SHAPE matters: the weight solve is invariant under
+            ``Mbar -> c Mbar``. ``None`` (default) is bit-identical to the
+            published behaviour. Note the 1D slice profiles are UNCHANGED --
+            the metric enters the weight solve only, so the trial space is
+            the same and only its optimal element moves.
 
     Returns:
         SlicedCommittorResult
@@ -1025,6 +1041,7 @@ def compute_sliced_committor(
             UserWarning,
             stacklevel=2,
         )
+    feature_metric = validate_feature_metric(feature_metric, dim)
     # β cancels in every downstream output; fixing β=1 makes free_energies = -log ρ.
     beta = 1.0
     # Halo mitigation: absorption truncation defaults to the boundary quantile.
@@ -1273,6 +1290,7 @@ def compute_sliced_committor(
         sample_weights=sample_weights,
         axis=axis,
         lda_info=lda_info,
+        feature_metric=feature_metric,
     )
 
 
@@ -1284,7 +1302,7 @@ def compute_sliced_committor(
 def make_weighting_context(result: SlicedCommittorResult) -> WeightingContext:
     """Create WeightingContext from SlicedCommittorResult."""
     ds = result.slice_coords[:, 1] - result.slice_coords[:, 0]  # (M,)
-    cos_matrix = result.directions @ result.directions.T  # (M, M)
+    cos_matrix = cos_matrix_from_metric(result.directions, result.feature_metric)  # (M, M)
 
     return WeightingContext(
         directions=result.directions,
@@ -1303,6 +1321,7 @@ def make_weighting_context(result: SlicedCommittorResult) -> WeightingContext:
         boundary_errors=result.boundary_errors,
         cos_matrix=cos_matrix,
         sample_weights=result.sample_weights,
+        feature_metric=result.feature_metric,
     )
 
 
@@ -1850,6 +1869,7 @@ def compute_enriched_basin_moment_weights(
     raise_on_degenerate: bool = True,
     cond_enriched_threshold: float = 1e-6,
     gram_dtype: str = "float64",
+    heldout_cap: bool = False,
 ) -> dict:
     """Enriched Basin-Moment-Constrained (EBMC) variational weight solver.
 
@@ -1900,6 +1920,12 @@ def compute_enriched_basin_moment_weights(
             default 1e-6.
         gram_dtype: dtype for the dominant ``(M, N)×(N, M)`` inner product.
             Default ``'float64'``.
+        heldout_cap: with ``tikhonov='halfset_eigen'``, also return
+            ``result['heldout_cap']``, the held-out Dirichlet cap evaluated
+            through this same solve. That is the label-free quantity for
+            ranking trial spaces -- direction sets, sampler parameters, M --
+            and it is read out of sample so that it can rank them; the
+            in-sample energy is monotone in M by construction and cannot.
 
     Returns:
         dict with ``w`` (M,), ``c`` (float), ``q_bar`` (M, zeros), basin
@@ -1920,6 +1946,7 @@ def compute_enriched_basin_moment_weights(
         raise_on_degenerate=raise_on_degenerate,
         cond_enriched_threshold=cond_enriched_threshold,
         gram_dtype=gram_dtype,
+        heldout_cap=heldout_cap,
     )
 
 

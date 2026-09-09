@@ -50,6 +50,8 @@ from .gram import (
     _assemble_gram_matrix,
     _compute_derivative_matrix,
     compute_shared_gram_diagnostics,
+    resolve_cos_matrix,
+    resolve_metric_diagonal,
 )
 from .weights import _interpolate_q_at_samples_masked, _mask_and_regularize_gram, _resolve_eta
 
@@ -284,7 +286,9 @@ def _add_bmc_diagnostics(result, G, a, b, valid_mask, ctx=None):
     ``|aᵀw|`` and ``|bᵀw − 1|`` (must be machine epsilon for a well-posed
     KKT solve) and ``sum_w`` (reported but not constrained by BMC).
     """
-    compute_shared_gram_diagnostics(result, G, valid_mask, ctx=ctx)
+    compute_shared_gram_diagnostics(
+        result, G, valid_mask, ctx=ctx, metric_diag=resolve_metric_diagonal(ctx)
+    )
     w = result["w"]
     result["constraint_residual_A"] = float(jnp.abs(jnp.dot(a, w)))
     result["constraint_residual_B"] = float(jnp.abs(jnp.dot(b, w) - 1.0))
@@ -367,7 +371,7 @@ def basin_moment_weights(
     # matmul cost, and the (M, M) result is upcast to cos_matrix.dtype inside
     # _assemble_gram_matrix before the cosine factor + KKT solve.
     F = _compute_derivative_matrix(ctx, projected_samples)
-    cos_matrix = ctx.cos_matrix if ctx.cos_matrix is not None else ctx.directions @ ctx.directions.T
+    cos_matrix = resolve_cos_matrix(ctx)
     matmul_dtype = jnp.dtype(gram_dtype)
     F_lo = F.astype(matmul_dtype)
     W_lo = W.astype(matmul_dtype)

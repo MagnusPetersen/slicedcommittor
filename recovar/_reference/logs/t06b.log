@@ -1,0 +1,64 @@
+=== N=3000 ===
+           bandwidth     RMSE  1/Mgap/nu     h_test
+       global bw=0.5   0.0428     0.0263  8.320e+02
+       global bw=1.0   0.0163     0.8040  2.080e+02
+       global bw=2.0   0.0164     0.5893  2.587e+02
+       global bw=4.0   0.0085     0.9760  1.802e+02
+       global bw=8.0   0.0138     0.9228  1.713e+02
+      global bw=16.0   0.0122     0.9705  1.501e+02
+adaptive: density ISE   0.0194     1.4544  9.651e+01
+adaptive: profile CV   0.0087     0.9335  1.561e+02
+  adaptive: deriv CV   0.0089     0.9328  1.889e+02
+   best global by truth : global bw=4.0 (RMSE 0.0085)
+   picked by h_test     : global bw=0.5 (RMSE 0.0428, 5.03x best)
+   profile-CV adaptive  : 1.02x best
+   deriv-CV adaptive    : 1.05x best
+
+=== N=6000 ===
+           bandwidth     RMSE  1/Mgap/nu     h_test
+       global bw=0.5   0.0378     0.2187  2.319e+02
+       global bw=1.0   0.0150     0.6112  2.748e+02
+       global bw=2.0   0.0130     0.7482  1.897e+02
+       global bw=4.0   0.0113     0.8990  1.586e+02
+       global bw=8.0   0.0147     0.9504  1.527e+02
+      global bw=16.0   0.0133     0.9270  1.099e+02
+adaptive: density ISE   0.0154     1.2904  1.177e+02
+adaptive: profile CV   0.0104     0.8973  1.693e+02
+  adaptive: deriv CV   0.0092     0.9670  1.618e+02
+   best global by truth : global bw=4.0 (RMSE 0.0113)
+   picked by h_test     : global bw=1.0 (RMSE 0.0150, 1.33x best)
+   profile-CV adaptive  : 0.92x best
+   deriv-CV adaptive    : 0.81x best
+
+=== N=15000 ===
+           bandwidth     RMSE  1/Mgap/nu     h_test
+       global bw=0.5   0.0075     0.8610  1.936e+02
+       global bw=1.0   0.0062     0.9382  1.695e+02
+       global bw=2.0   0.0054     0.9797  1.606e+02
+       global bw=4.0   0.0066     1.0322  1.514e+02
+       global bw=8.0   0.0138     1.3260  1.117e+02
+      global bw=16.0   0.0127     1.3101  1.099e+02
+adaptive: density ISE   0.0146     1.3192  1.191e+02
+adaptive: profile CV   0.0052     0.9823  1.593e+02
+  adaptive: deriv CV   0.0051     0.9993  1.577e+02
+   best global by truth : global bw=2.0 (RMSE 0.0054)
+   picked by h_test     : global bw=0.5 (RMSE 0.0075, 1.38x best)
+   profile-CV adaptive  : 0.95x best
+   deriv-CV adaptive    : 0.93x best
+
+=== N=60000 ===
+           bandwidth     RMSE  1/Mgap/nu     h_test
+       global bw=0.5   0.0041     0.9625  1.427e+02
+       global bw=1.0   0.0039     0.9777  1.411e+02
+       global bw=2.0   0.0043     0.9900  1.383e+02
+       global bw=4.0   0.0060     1.0117  1.340e+02
+       global bw=8.0   0.0124     1.2573  8.944e+01
+      global bw=16.0   0.0122     1.2828  8.658e+01
+adaptive: density ISE   0.0139     1.2772  1.138e+02
+adaptive: profile CV   0.0038     0.9794  1.401e+02
+  adaptive: deriv CV   0.0033     0.9878  1.383e+02
+   best global by truth : global bw=1.0 (RMSE 0.0039)
+   picked by h_test     : global bw=0.5 (RMSE 0.0041, 1.05x best)
+   profile-CV adaptive  : 0.97x best
+   deriv-CV adaptive    : 0.84x best
+
