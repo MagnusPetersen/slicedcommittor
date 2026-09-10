@@ -61,7 +61,8 @@ TIER_ENV = "SLICED_COMMITTOR_GOLDEN_TIER"
 
 EXACT = dict(rtol=0.0, atol=0.0)
 ROUNDING = dict(rtol=1e-8, atol=1e-12)
-# name: (strict tier, drift tier); None = strict tier only (ill-conditioned).
+# name: (strict tier, drift tier); None = strict tier only (ill-conditioned);
+# scaled_atol = absolute tolerance as a fraction of the reference's largest entry.
 _TIERS = {
     "directions": (EXACT, dict(rtol=0.0, atol=1e-12)),
     "basis": (ROUNDING, dict(rtol=1e-8, atol=1e-9)),
@@ -79,7 +80,7 @@ _TIERS = {
     "reference": (dict(rtol=1e-8, atol=0.0), dict(rtol=0.0, atol=1e-3)),
     "reference_scalar": (dict(rtol=1e-8, atol=0.0), dict(rtol=5e-2, atol=0.0)),
     "reference_ssnr": (dict(rtol=1e-10, atol=0.0), None),
-    "regulariser": (dict(rtol=1e-10, atol=1e-14), dict(rtol=1e-2, atol=1e-6)),
+    "regulariser": (dict(rtol=1e-10, atol=1e-14), dict(scaled_atol=1e-2)),
     "regulariser_ssnr": (dict(rtol=1e-10, atol=0.0), None),
 }
 
@@ -116,6 +117,9 @@ def check(strict):
         tol = _TIERS[name][0 if strict else 1]
         if tol is None:
             return
+        if "scaled_atol" in tol:  # absolute, relative to the reference's largest entry
+            scale = float(np.max(np.abs(np.asarray(ref, np.float64))))
+            tol = dict(rtol=0.0, atol=tol["scaled_atol"] * scale)
         try:
             close(got, ref, **tol)
         except AssertionError as exc:

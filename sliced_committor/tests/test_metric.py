@@ -66,13 +66,14 @@ def torsion_g(grad, atom_w=None):
 # the gradient
 # ---------------------------------------------------------------------------
 def test_dihedral_matches_the_kernel_that_built_the_features():
-    """Bit-exact against the frozen output of the research kernel the paper's
-    AIB9/villin features were built with (``golden/dihedral_reference.npz``)."""
+    """To rounding against the frozen output of the research kernel the paper's
+    AIB9/villin features were built with (``golden/dihedral_reference.npz``);
+    bit for bit on the machine that froze it, one ulp on another."""
     ref = np.load(os.path.join(GOLDEN, "dihedral_reference.npz"))
     got, _ = dihedral_and_grad(
         jnp.asarray(ref["xyz"])[:, ref["quads"], :], angle_sign=AngleSign.SRC_NEGATED
     )
-    np.testing.assert_array_equal(np.asarray(got), ref["dihedral_src_negated"])
+    np.testing.assert_allclose(np.asarray(got), ref["dihedral_src_negated"], rtol=0, atol=1e-13)
 
 
 def test_angle_sign_flips_the_angle():
