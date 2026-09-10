@@ -1,333 +1,213 @@
 # slicedcommittor
 
-<!--
-The repository is private during initial collaboration; the badges below
-will resolve once the remote is public.
--->
 [![CI](https://github.com/MagnusPetersen/slicedcommittor/actions/workflows/test.yml/badge.svg)](https://github.com/MagnusPetersen/slicedcommittor/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-**slicedcommittor** computes the committor function `q(x)`: the probability
-that a stochastic trajectory starting at `x` reaches state `B` before state
-`A`. The committor is the variationally optimal reaction coordinate for rare
-molecular transitions (protein folding, nucleation, ligand binding); its
-level sets define the transition-state ensemble, and the transition-path
-theory identity `k_{A->B} = D[q] / p_A` expresses kinetic rates as a single
-quadrature against it. Computing `q` in high dimensions has traditionally
-required a clustering of state space (Markov state models), a hand-chosen
-basis (Galerkin expansions), or a neural network with an architecture, loss,
-and training schedule.
+**slicedcommittor** computes the committor `q(x)`, the probability that a
+trajectory started at configuration `x` reaches state B before state A,
+from equilibrium samples and two state labels, and turns it into reaction
+rates. The committor is the reaction coordinate of a rare transition: its
+level sets are the transition-state ensemble, and the flux through them is
+the rate.
 
-This library implements the **sliced committor** introduced in
+The library implements the sliced committor of
 
 > Petersen, M., Lichtinger, S. and Covino, R.
 > *Committors and Reaction Rates from Trial Functions That Violate the Boundary Conditions*
 > (2026, manuscript submitted).
 
-The method writes the committor as a weighted sum of one-dimensional
-committors along random projections,
-`q(x) ≈ Σ_j w_j · q_j(θ_j · x)`, with each `q_j` from a 1D
-reaction-diffusion solve and the weights `w_j` recovered from a single
-symmetric linear solve on existing equilibrium samples. No clustering, no
-basis, no training; cost is linear in the number of samples and the
-configuration-space dimension. The paper validates the approach on the AIB9
-peptide and villin HP-35 directly from full torsion-angle representations,
-without any pre-specified reaction coordinate.
+The committor is written as a sum of one-dimensional committors along
+random directions,
 
-See [Citation](#citation) for how to cite the work.
+    q(x) = c + sum_j w_j q_j(theta_j . x),
 
-## Method
+each `q_j` solved on the projection of the samples onto its direction and
+the weights from one symmetric linear solve. No clustering, no basis
+functions, no training, and no dynamics: the fit reads the equilibrium
+density and the labels, and its cost is linear in the number of samples
+and in the dimension. The paper validates the method on the AIB9 peptide,
+villin HP-35 and chignolin from full torsion-angle representations, with no
+pre-specified reaction coordinate, and reads the chignolin folding rate off
+umbrella-sampling data.
 
-Instead of solving the full committor PDE in d dimensions, the algorithm:
+## What it needs, and what it returns
 
-1. Projects samples onto many random 1D directions (uniform on the sphere by default).
-2. Solves a 1D reaction-diffusion committor problem along each slice.
-3. Combines the slice committors with principled weights. The recommended
-   default is the **enriched basin-moment-constrained solver (EBMC)**, which
-   adds a free bias to the linear aggregator and yields a closed-form
-   solution that strictly improves on the vanilla BMC simplex in Dirichlet
-   energy. A higher-order variant (**PESB-EBMC**) augments each per-slice
-   basis with a smoothstep family `Ψ_n(v) = v^n / (v^n + (1-v)^n)` for
-   additional resolving power on heterogeneous transitions.
+* **Samples.** An `(N, dim)` float64 array of configurations from the
+  equilibrium ensemble, in any feature space: Cartesian coordinates,
+  torsion sines and cosines, distances. A biased ensemble works with
+  per-frame weights that sum to one (`sample_weights`; MBAR weights for
+  umbrella sampling).
+* **States.** Two `(N,)` boolean masks, `in_A` and `in_B`, marking the
+  frames inside the two metastable states. They must be disjoint and both
+  populated; how you define the states is yours to decide.
+* **Time order.** The default regularisation and the error bars deal the
+  frames into contiguous blocks, so consecutive frames must be consecutive
+  in time. Independent runs go end to end, never shuffled.
+* **For a rate, dynamics.** The committor needs none. A rate needs the
+  diffusion along the reaction coordinate, measured on a time-ordered
+  series with its frame spacing `dt`, or taken from a known diffusion
+  coefficient.
 
-## Theory primer
+Back comes a callable `q(x)`, a pure JAX function of `x` that `jax.grad`
+differentiates, with the diagnostics that judge the fit without a
+reference committor.
 
-The committor `q(x)` is the probability that a stochastic trajectory starting
-at `x` reaches basin B before basin A. Solving its PDE
-`∇ · (e^{-βV} ∇q) = 0` in `d` dimensions becomes infeasible for `d ≳ 5`.
+## The assumption you accept
 
-The sliced approach replaces the d-dimensional solve with `M` independent
-1D solves:
-
-1. **Project.** For each random direction `θ_j` on the unit sphere, project
-   every sample `x_i` to a scalar `s_{ij} = θ_j · x_i`.
-2. **Solve along the slice.** Fit a histogram free-energy `F_j(s)`, build the
-   1D Smoluchowski operator with absorbing boundaries on the projected basins
-   `θ_j(A)`, `θ_j(B)`, and solve the resulting tridiagonal linear system for
-   the per-slice committor `q_{θ_j}(s)`.
-3. **Aggregate.** Recombine the slice committors into the d-dimensional
-   estimator
-   `q̂(x) = c + Σ_j w_j · q_{θ_j}(θ_j · x)`,
-   choosing weights `w_j` and an optional bias `c` to satisfy basin-mean
-   constraints (`E_A[q̂] = 0`, `E_B[q̂] = 1`) while minimising aggregate
-   Dirichlet energy.
-
-The recommended weight solver (**EBMC**) computes `w, c` in closed form via
-a single regularised Gram solve; the higher-order **PESB-EBMC** variant
-enriches the per-slice basis with smoothstep functions `Ψ_n(v)`.
-
-A boundary-error term `ε_j` measures how far the 1D solve fails to hit
-`q = 0` / `q = 1` at the projected basin edges; weights are corrected by
-`(1 - ε_j)_+` to suppress unreliable slices. Three estimators ship
-(equilibrium, RMS, 1D flux), differing in which moments of `q` they
-penalise.
-
-The accompanying paper derives the constraint algebra and the
-Galerkin-monotonicity property in full.
+For a reversible diffusion the committor minimises the Dirichlet form
+`<grad q^T D grad q>` over the equilibrium density, under `q = 0` on A and
+`q = 1` on B. The density is in the samples and the boundary values are in
+the labels, which is why static samples suffice. What the samples cannot
+tell is the shape of the diffusion tensor `D` in your feature space. The
+library takes it to be the identity, which holds for Cartesian coordinates
+in explicit solvent, and accepts a metric when it does not: for torsion
+features that is the pull-back metric `sincos_pullback_metric`, the
+paper's setting on all three proteins.
 
 ## Install
 
 ```bash
-# from a clone of the repo:
-pip install -e .
-
-# directly from GitHub (requires read access to the private repo):
-pip install git+ssh://git@github.com/MagnusPetersen/slicedcommittor.git
+pip install sliced-committor              # jax, numpy, scipy
+pip install sliced-committor[umbrella]    # + mdtraj and pymbar, for umbrella-sampling data
 ```
 
-Hard dependencies: `jax >= 0.4.20`, `numpy >= 1.24`. Users pick the JAX
-accelerator flavour (`jax[cpu]`, `jax[cuda12]`, …) themselves; the library
-does not pin one.
+Pick your own JAX build (`jax[cpu]`, `jax[cuda12]`, ...); the library does
+not pin one. Float64 is required; enable it before anything else.
 
-## Quickstart (recommended defaults)
+## Fit, check, use
 
 ```python
 import jax
-jax.config.update("jax_enable_x64", True)   # required for EBMC
 
-from sliced_committor import fit_committor
+jax.config.update("jax_enable_x64", True)
 
-# samples: (N, dim) array of configurations
-# in_A, in_B: (N,) bool arrays, basin labels
-q = fit_committor(
-    samples, in_A=in_A, in_B=in_B,
-    weights="ebmc", n_directions=256,
-)
+from sliced_committor import committor_gradient, fit_committor
 
-# q is a callable committor; evaluate at new points
-# (optional q=0/q=1 boundary enforcement via the basin masks):
-q_vals = q(points, in_A=in_A_at_points, in_B=in_B_at_points)
+# samples: (N, dim) equilibrium configurations; in_A, in_B: (N,) bool state labels
+q, fit = fit_committor(samples, in_A=in_A, in_B=in_B, n_directions=256, return_details=True)
+
+q_vals = q(points)  # (P,) committor values in [0, 1]
+q_snapped = q(samples, in_A=in_A, in_B=in_B)  # exactly 0 on A and 1 on B
+grad_q = committor_gradient(q, points)  # (P, dim), by autodiff
+
+print(fit.result.summary())  # the slice basis: directions, bins, boundary errors
+print(fit.weights.dirichlet_energy, fit.weights.cond)  # the objective and the representation gate
 ```
 
-`fit_committor` builds the slices, solves the EBMC weights, and returns a
-callable committor `q(points, *, in_A=None, in_B=None)` implementing the
-affine-aware aggregator `q̂(x) = c + Σ_j w_j q_{θ_j}(θ_j·x)`. For step-by-step
-control use `compute_sliced_committor` + a weight solver + `build_committor`.
+Three numbers say how the fit went, and none needs a reference:
 
-## Recommended settings (cross-system consensus)
+* `fit.result.boundary_errors`, one per direction: how far that slice's 1D
+  committor is from 0 on A and 1 on B. A large value means the direction
+  separates the states badly; the weights suppress such slices, and a fit
+  in which every slice is bad points at features that do not resolve the
+  states, or at states that overlap.
+* `fit.weights.cond`, the representation gate. It collapses, and the solve
+  raises, when no combination of the slices separates the states.
+* `fit.weights.dirichlet_energy`, the variational objective `w^T G w`.
+  Lower is closer to the true committor, so it ranks fits of the same
+  data. With `heldout_cap=True` the same objective is read on folds the
+  solve did not see, which also ranks different trial spaces.
 
-The library's defaults were tuned against the combined paper figures on
-AIB9, villin HP-35, and chignolin. They are optimal-but-general; you should
-not need to touch them for a typical run.
+A rate adds a fourth: the flatness of the reactive flux along `q`, which
+is constant for the exact committor.
 
-| Setting | Default | Where it varies |
+## Settings
+
+The defaults are the paper's settings; the table gives the per-system
+values the paper uses.
+
+| setting | what it controls | default | the paper |
+|---|---|---|---|
+| `n_directions` | the number of slices `M`. The cost is linear in `M`, and the default regularisation keeps a large `M` from over-fitting | 256 | 512 (AIB9), 2048 (villin), 256 (chignolin, Wolfe-Quapp) |
+| `n_bins`, `binning_method` | the 1D histogram of each slice: its resolution, and equal-count (`"quantile"`) or `"equal_width"` bins | 200, `"quantile"` | 2000 (AIB9), 500 (villin), 100 equal-width (chignolin), 200 equal-width (Wolfe-Quapp) |
+| `direction_sampling` | uniform on the sphere, or a cone around the Fisher discriminant axis between the states | uniform | the cone, `DirectionSamplingConfig(mode="lda", mu=0.8 / 0.7 / 0.5, alpha=0.2)` on AIB9 / villin / chignolin |
+| `feature_metric` | the shape of the diffusion tensor in feature space, in the weight solve | identity | `sincos_pullback_metric` on the torsion features of the proteins |
+| `boundary_quantile` | where the absorbing boundaries of the 1D solves sit inside the projected states; below 1 it removes the halo that many nuisance dimensions inflate | 1.0 | 0.99 (AIB9), 0.98 (villin) |
+| `sample_weights` | per-frame weights of a biased ensemble | uniform | MBAR on chignolin |
+| `tikhonov` | the regularisation of the Gram solve | `"halfset_eigen"` | the same everywhere: it has no constant to tune |
+
+## Rates
+
+The rate is a reduction of the committor-coordinate flux
+`nu_R(q) = D_q(q) pi(q)`, constant in `q` for the exact committor. The
+density `pi(q)` comes from the samples. The diffusion `D_q` along the
+committor is the one thing the static ensemble cannot supply, and where
+it comes from depends on your data:
+
+| you have | `D_q` comes from | functions |
 |---|---|---|
-| `n_directions` | 256 | 512 (AIB9 / mid-d), 4096 (villin / large) |
-| `n_bins` | 200 | 2000 (AIB9 paper polish), 300 (villin) |
-| `seed` | 42 | (any) |
-| `binning_method` | `'quantile'` | unchanged across systems |
-| `n_min` | 10 | unchanged across systems |
-| `boundary_quantile` | 1.0 | 0.95-0.98 if d ≫ k and halo artefacts appear |
-| `rd_kappa` | 1e12 | hard absorption, unchanged across systems |
-| `direction_sampling` | `None` (uniform) | `DirectionSamplingConfig(mode=...)` for `'lda'`, `'pca'`, `'gcpca'`; or `directions_tica_ema(...)` for time-lagged trajectories |
-| weight solver | **EBMC** (this README's quickstart) | PESB-EBMC P=2 for heterogeneous transitions |
-| `tikhonov` | `'auto'` | unchanged across systems |
-| `gram_dtype` | `'float64'` for EBMC/PESB/BMC (required); `'float32'` for full-Gram | matches paper runs |
-| ε estimator | equilibrium (cached) | `compute_epsilon_rms` for fat-tailed states |
+| a long unbiased trajectory in which the committor diffuses | the Kramers-Moyal estimate on `q` itself, at a lag read off a lag scan | `lag_scan`, `diffusion_profile`, or `committor_rate(trajectory=...)` |
+| umbrella sampling along a collective variable `s` | the diffusion along `s` by the pooled-autocorrelation Hummer estimator, mapped into committor space through the Jacobian: the paper's route | `pooled_acf_diffusion`, `committor_grad_sq`, `linear_response_grad_sq`, `committor_diffusion_from_cv`; together in `umbrella.fit_and_rate` |
+| a model with a known mobility `D0` | the same map with `cv_grad_sq=1` | `committor_diffusion_from_cv(g_q, D_s=D0, cv_grad_sq=1.0)` |
 
-For very high-dimensional Cartesian features (d ≳ 200) the paper runs lower
-`boundary_quantile` to ~0.95 to suppress halo inflation in the projected
-state shadows. For low-d torsion features, the default 1.0 is fine.
-
-## Tuning settings + the variational objective
-
-Every fit can report its **Dirichlet energy** `𝓓[q̂] = ⟨D|∇q̂|²⟩` — a label-free,
-ground-truth-free quality score (lower is closer to the true committor, by the
-variational principle). Ask for it with `return_details=True`:
+The paper's route, given the diffusion `D_s` measured along `s` and the
+mean squared gradient `g_s` of `s` in the feature space:
 
 ```python
-q, fit = fit_committor(samples, in_A=in_A, in_B=in_B, return_details=True)
-print(fit.dirichlet_energy)          # the variational objective of this fit
+from sliced_committor import committor_diffusion_from_cv, committor_grad_sq, committor_rate
+
+g_q = committor_grad_sq(q, samples)  # <|grad q|^2> on the iso-committor surfaces
+D_q = committor_diffusion_from_cv(g_q, D_s=D_s, cv_grad_sq=g_s)  # D_q(q) = D_s g_q(q) / g_s
+rate = committor_rate(q, samples, D_q=D_q, in_A=in_A, in_B=in_B)  # the plateau of D_q pi
+k_AB, k_BA, flatness = rate["k_AB"], rate["k_BA"], rate["flatness"]
 ```
 
-To choose settings, sweep a grid and keep the best by that objective — no ground
-truth required:
+`flatness` is the relative spread of the flux over the transition region,
+the committor-quality score that needs no reference.
+[docs/rates.md](docs/rates.md) walks through the three routes, the four
+reductions and how to read their spread.
 
-```python
-from sliced_committor import sweep_committor
+## Umbrella sampling
 
-res = sweep_committor(
-    samples, in_A=in_A, in_B=in_B,
-    grid={"n_directions": [128, 256], "weights": ["ebmc", "full_gram"]},
-    n_bins=200,                       # held fixed across the sweep
-)
-print(res.summary())                 # one row per grid combination; best marked *
-q = res.best_committor               # the winner's callable q(x)
+```python skip
+from sliced_committor.umbrella import USDataset, fit_and_rate, reweight
+
+dataset = USDataset(features=..., cvs=..., window_ids=..., window_centers=...,
+                    window_kappa=..., beta=..., dt=..., in_A=..., in_B=...,
+                    cv_periodic=(None,), meta={})
+w = reweight(dataset).sample_weights  # MBAR, with a WHAM fallback
+out = fit_and_rate(dataset, dataset.features, w)
+k_AB = out["rates"]["cvmap"]["plateau"]["k_AB"]
 ```
 
-The Dirichlet energy is only comparable *within* the Gram-family solvers
-(`ebmc` / `pesb` / `bmc` / `full_gram`); a sweep that also varies onto the
-diagonal solver ranks on mismatched scales, so it warns — rank one family at a
-time, or pass a custom `select_by`. The mean boundary error is reported
-alongside as a guard against a fit that lowers its energy by undershooting the
-`q=0` / `q=1` boundaries.
+`fit_and_rate` fits the committor on the reweighted ensemble, measures the
+diffusion along the biased coordinate from the windows' time series, maps
+it into committor space and reads off the rates, with the committor-free
+Kramers baseline beside them. [docs/umbrella.md](docs/umbrella.md) gives
+the dataset contract, the readers for PLUMED and mdtraj files, and the same
+computation step by step.
 
-## Direction-sampling alternatives
+## Cost
 
-The default sampler is uniform on the sphere. For directed bias, the
-library ships:
+The fit holds the projection of every sample onto every direction, an
+`(M, N)` float64 array, and a few working arrays of that size;
+`direction_batch_size` bounds the transient. Runtime is linear in `N`,
+`dim` and `M`: the 2D example (`N = 100,000`, `M = 256`) fits in under a
+minute on a CPU, the paper's largest fit (villin: `N = 200,000`,
+`dim = 350`, `M = 2048`) in a few minutes on a workstation. The same code
+runs on a GPU.
 
-```python
-from sliced_committor import (
-    DirectionSamplingConfig,         # config NamedTuple
-    directions_uniform,              # baseline
-    directions_pca, pca_basis,       # top-/bottom-K PCA axes (label-free)
-    directions_gcpca, gcpca_basis,   # generalised contrastive PCA v4.1
-                                     #   (target = A ∪ B vs background)
-    directions_tica_ema,             # EMA-integrated slow modes (single trajectory)
-    directions_tica_ema_decomposed,  # bias-aware TICA-EMA (umbrella sampling)
-    compute_lda_axis,                # single-axis LDA bias
-    sample_power_spherical_mixture,  # the underlying mixture sampler
-)
-```
+## Documentation
 
-Pass `direction_sampling=DirectionSamplingConfig(mode='pca', n_bias_axes=4)`
-(or similar) to `compute_sliced_committor` and the dispatcher computes the
-bias axes from the samples, then feeds them through a power-spherical +
-uniform mixture (per-axis weights default to the `|λ|`-simplex). The
-`(μ, α)` knobs are dimension-invariant: `α=1` is pure uniform, `α=0` is
-pure informed (the dispatcher warns at `α < 0.1`).
+In reading order:
 
-Kernel-based axes (diffusion maps, RBF kernel PCA via random Fourier
-features) are deliberately not shipped in the library, they are unstable
-in our hands.
+1. [quickstart](docs/quickstart.md): the inputs and why each is needed,
+   the one call, what comes back and how to read it.
+2. [theory](docs/theory.md): the model, the sliced ansatz, the weight
+   solve and the diagnostics it yields.
+3. [settings](docs/settings.md): every setting, what it does, how to
+   choose it without a reference, and error bars.
+4. [rates](docs/rates.md): from the committor to a rate, by three routes.
+5. [umbrella sampling](docs/umbrella.md): the dataset contract and the
+   rate bundle.
+6. [reproducibility](docs/reproducibility.md) and
+   [design decisions](docs/design_decisions.md): what is pinned, and what
+   was tried and is not here.
 
-## Higher-order softmix basis (PESB-EBMC)
-
-For heterogeneous transition regions, augment each per-slice basis with the
-smoothstep family `Ψ_n(v) = v^n / (v^n + (1−v)^n)` for `n ∈ n_values`:
-
-```python
-from sliced_committor import compute_enriched_basin_moment_weights_power, build_committor
-
-pesb = compute_enriched_basin_moment_weights_power(
-    result, samples, P=2,                # n_values defaults to [1.0, 2.0]
-)
-q = build_committor(result, pesb)        # callable committor; q(points)
-print("Dirichlet improvement over plain EBMC:", pesb["improvement_over_ebmc"])
-```
-
-## All weight solvers
-
-```python
-from sliced_committor import (
-    # Recommended default (closed-form, strict Dirichlet improvement):
-    compute_enriched_basin_moment_weights,
-
-    # Higher-order softmix basis on top of EBMC:
-    compute_enriched_basin_moment_weights_power,
-
-    # Vanilla BMC (two basin-moment constraints, no bias):
-    compute_basin_moment_weights,
-
-    # Full-Gram simplex (Σw = 1):
-    compute_full_gram_weights,
-
-    # Diagonal RD-corrected, dispatched through compute_weights_multi:
-    corrected_dirichlet_inv_rd,
-    compute_weights_multi,
-    get_default_weight_functions,
-)
-```
-
-The Gram-based solvers (EBMC, PESB-EBMC, BMC, full-Gram) do not go through
-`compute_weights_multi`: they take richer kwargs (Tikhonov, ε-estimator,
-Gram dtype) and return a dict carrying weights + diagnostics rather than a
-bare vector.
-
-**Float64 requirement.** EBMC, PESB-EBMC, and plain BMC all require
-`jax.config.update("jax_enable_x64", True)` before the result is built.
-
-## Three ε estimators
-
-```python
-from sliced_committor import (
-    compute_epsilon_equilibrium,   # equilibrium-weighted, default
-    compute_epsilon_rms,           # RMS variant (≥ equilibrium pointwise)
-    compute_epsilon_flux1d,        # flux-importance-reweighted (1D)
-    compute_epsilon,               # dispatcher: name -> estimator
-)
-```
-
-Pass any of these as the `epsilon_fn` argument to
-`compute_full_gram_weights` to override the cached equilibrium ε
-(`compute_epsilon_rms` is the most common alternative).
-
-### Utility
-
-```python
-from sliced_committor import make_weighting_context, WeightingContext
-```
-
-`make_weighting_context(result)` builds the `WeightingContext` bundle that
-weight functions and ε estimators consume. Call this if you want to invoke
-a weight function directly (`corrected_dirichlet_inv_rd(ctx)`) rather than
-via `compute_weights_multi`.
-
-## Reaction rates
-
-The `sliced_committor.rates` subpackage turns a fitted committor into reaction
-rates and transport coefficients along the committor coordinate:
-
-```python
-from sliced_committor import fit_committor, committor_rate
-
-q = fit_committor(samples, in_A=in_A, in_B=in_B, weights="ebmc")
-rate = committor_rate(
-    q, samples, trajectory, dt=dt, reduction="harmonic",
-    sample_weights=w, window_ids=window_ids, in_A=in_A, in_B=in_B,
-)
-print(rate["k_AB"], rate["k_BA"])      # rates in 1/dt units
-```
-
-`committor_rate` is the coordinate-invariant estimator: every rate is a
-functional of the pair `{D_q(q), π(q)}` (committor-coordinate diffusion +
-equilibrium density), with the local reactive flux `ν_R(q) = D_q(q)·π(q)`. The
-`reduction` selects the functional: `harmonic` (the 1D-Smoluchowski MFPT,
-default), `plateau` (TPT flux), `arithmetic` (the Dirichlet form), or `local`.
-For the exact committor `D_q·π` is constant and all agree; the spread on an
-approximate committor is a quality diagnostic.
-
-```python
-from sliced_committor import (
-    committor_rate,            # coordinate-invariant {D_q, π} reductions (recommended)
-    berezhkovskii_szabo_rate,  # named MFPT / local-D(q*) alias of committor_rate
-    dirichlet_rate, tpt_rate,  # feature-space forms (take a length-scale D)
-    kramers_rate,              # overdamped Kramers barrier crossing
-    density, diffusion_coefficient, reactive_flux,   # the underlying quantities
-    saddle_bridge_D,           # calibrated configurational D for the feature-space forms
-    find_plateau,              # automatic flux-flatness plateau
-)
-```
-
-## Memory note
-
-`compute_sliced_committor(..., store_projected_samples=True)` (the default)
-materialises an `(M, N)` array of projected samples. For `N ≈ 10⁶` and `M = 256`
-that's ~1 GB at float32. Pass `store_projected_samples=False` if you don't
-need the full Gram or BMC solvers afterwards; the diagonal weight solver
-re-projects on demand.
+`examples/` holds three self-contained walkthroughs on the paper's 2D
+benchmark: the committor step by step, the rate against an exact
+reference, and model selection with error bars.
 
 ## Citation
 
@@ -337,11 +217,9 @@ If you use `slicedcommittor` in published work, please cite the paper:
 > *Committors and Reaction Rates from Trial Functions That Violate the Boundary Conditions*
 > (2026, manuscript submitted).
 
-A machine-readable [`CITATION.cff`](CITATION.cff) sits at the repo root. GitHub
-renders a **"Cite this repository"** button on the project page (top-right
-sidebar) that exports the entry as BibTeX, APA, EndNote, or RIS with one click.
-
-BibTeX:
+A machine-readable [`CITATION.cff`](CITATION.cff) sits at the repository
+root; GitHub's "Cite this repository" button exports it as BibTeX, APA,
+EndNote or RIS.
 
 ```bibtex
 @article{petersen2026sliced,
@@ -351,6 +229,3 @@ BibTeX:
   note    = {Manuscript submitted; journal and DOI to be filled in on acceptance.},
 }
 ```
-
-Update the `note`, `journal`, and `doi` fields once the paper is accepted;
-keep [`CITATION.cff`](CITATION.cff) in lockstep with the BibTeX block.

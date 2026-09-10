@@ -1,11 +1,167 @@
 # Changelog
 
-All notable changes to `sliced-committor` will be documented in this file.
+All notable changes to `sliced-committor` are documented in this file. The
+format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [1.0.0] - 2026-09-09
 
-## [Unreleased]
+The first public release. The public surface is `sliced_committor.__all__`
+(36 names) and `sliced_committor.umbrella.__all__`, and it is the stability
+promise from here on. The paper's figures and rate table are reproduced by
+the Zenodo package against this version. Versions 0.3 to 0.6 were never
+published; their history is kept below and their code at tag `v0.6.0`.
+
+### The committor
+
+- One weight solver, `solve_weights(result, *, tikhonov="halfset_eigen",
+  heldout_cap=False, raise_on_degenerate=True, counts=None)`, returning a
+  typed `Weights`
+  (`w`, `c`, `dirichlet_energy`, `moment_gap`, `cond`, `ridge`, `tikhonov`,
+  `heldout_cap`, `diagnostics`). `build_committor(result, weights, clip=True)`
+  returns the callable `q(x, in_A=None, in_B=None)`; `fit_committor(samples,
+  in_A=, in_B=, n_directions=256, seed=42, tikhonov=, heldout_cap=,
+  return_details=, **solver_kwargs)` is the one-call path and returns
+  `(q, CommittorFit)` with details.
+- The half-set spectral filter is the default ridge. `tikhonov="auto"` is the
+  closed-form scalar ridge and a float is an absolute ridge in the units of
+  `G`. `heldout_cap=True` needs the filter and returns the cap, its standard
+  error, the per-fold values and the train-versus-held-out `gap`. The
+  regularisation lives in `core/_halfset.py`, absorbed from the RECOVAR
+  research package together with the contiguous folds and the block
+  bootstrap.
+- `bootstrap_weights(result, weights, *, n_boot=40, block_len, run_ids=None,
+  seed=0, points=None, min_basin_frames=5)` block-bootstraps the weights with
+  the basis fixed, skips a replicate that leaves fewer than
+  `min_basin_frames` frames in a basin, and returns a `Bootstrap` (`n_ok`
+  counts the replicates kept).
+- `rescale_transition(q_values, in_A, in_B)` is a function of an evaluated
+  batch; the committor callable is a pure function of `x`.
+- `compute_sliced_committor` takes `n_directions`, `n_bins`, `seed`,
+  `binning_method`, `density_floor`, `n_min`, `rd_kappa`,
+  `boundary_quantile`, `direction_batch_size`, `sample_weights`,
+  `directions`, `direction_sampling` and `feature_metric`;
+  `store_projected_samples`, `quantile_subsample` and `absorption_quantile`
+  are gone, `binning_method` is validated, `sample_weights` must sum to one
+  (the solve uses them verbatim, so the Dirichlet energies of fits are
+  comparable), `rd_kappa` is `1e12` in one place, and `valid_mask` now means
+  that the 1D solve is finite.
+- Directions: `DirectionSamplingConfig(mode="uniform" | "lda", lda_shrinkage,
+  mu, alpha, axis)`; `compute_lda_axis`, `sample_power_spherical_mixture(key,
+  axis, n_directions, dim, mu=, alpha=)` (one axis) and `directions_uniform`
+  are public so that the axis can be inspected or replaced and the draw
+  reproduced outside the solve.
+- The feature-space metric `sincos_pullback_metric` and `AngleSign` are
+  exported; `AngleSign` is required.
+- `scipy>=1.10` is a hard dependency (the half-set path used it undeclared);
+  `jax>=0.5.3` is the oldest version tested, and CI runs it.
+- Uniform sample weights are exactly `ones(N) / N` (a one-ulp renormalisation
+  was amplified to `4e-4` in the half-set weights) and the `(M, M)` solve stays
+  on scipy's Cholesky (the JAX one differs by `1e-4` at condition `1e12`).
+  Golden references under `tests/golden/` pin both: bit for bit on the
+  machine that froze them with JAX 0.5.3 (`SLICED_COMMITTOR_GOLDEN_TIER=strict`,
+  the release gate), and at the measured drift between JAX builds and
+  machines by default (`docs/reproducibility.md`).
+
+### Rates
+
+- The state is the pair `{D_q, pi}`. `density`, `committor_grad_sq` and
+  `basin_populations` read the static ensemble; `diffusion_profile` (at an
+  explicit `lag`), `lag_scan`, `hummer_diffusion` and `pooled_acf_diffusion`
+  (the paper's estimator, promoted from the reproduction package with
+  `run_ids` and `window_band`) measure the diffusion on a trajectory (no
+  estimator reads across a run join, `diffusion_profile` included);
+  `committor_diffusion_from_cv` is the Jacobian map from a collective
+  variable, with `linear_response_grad_sq` for the CV's gradient and
+  `committor_diffusion_from_cv_reparam` (gated by the squared Spearman rank
+  correlation) as the gradient-free alternative. Quantities take per-sample
+  values, not the committor, except `committor_grad_sq`, which differentiates it.
+- `rate_from_profiles(pi, D_q, rho_A, rho_B, *, reduction="plateau", band=,
+  q_star=, window=)` unifies the reductions (plateau, arithmetic, harmonic,
+  local); each accepts only its own parameter. Every result carries the
+  arithmetic and harmonic values, the profiles `nu` and `D_q` on the
+  density's grid, and `flatness`; `flux_flatness` is the paper's `flux_cv`
+  on a fixed band.
+- `committor_rate(q, samples, *, D_q= | trajectory=, dt=, lag=, window_ids=,
+  run_ids=, ...)`: the two routes are mutually exclusive.
+- The MFPT quadrature uses midpoint cumulative masses, so the discrete
+  identity `int M_A dq = rho_A` is exact and every reduction returns the same
+  rate to rounding on an exact committor.
+- `rates.baselines.pmf_kramers_rate(pi, D)` takes profiles along a physical
+  coordinate; `rates.units` holds the unit conversions.
+
+### Umbrella sampling
+
+- `sliced_committor.workflows` is `sliced_committor.umbrella`: `USDataset`
+  (without `system_name` and `cv_names`), `reweight` / `mbar_weights` /
+  `wham_weights`, the reading helpers `read_colvar`, `parse_restraint`,
+  `load_trajectory` and `align_colvar_traj` in `io`, `mdtraj_metric`, and
+  `fit_and_rate(dataset, features, sample_weights, *, n_directions=, n_bins=,
+  seed=, tikhonov=, bridge_metric=, D_s=, run_ids=, diffusion=("cvmap",),
+  reductions=, lag=, n_diff_bins=, strict=True, **solver_kwargs)` (the solver
+  settings, `direction_sampling`, `directions` and `feature_metric` among
+  them, ride in `solver_kwargs`) returning one bundle (`committor`,
+  `q_samples`, `D_s`, `cv_grad_sq`, `profiles`, `rates`, `flux_cv`,
+  `kramers`, `errors`), with `kramers_baseline(dataset, weights)` as the
+  baseline on its own. `fit_and_rate` no longer switches `jax_enable_x64` on
+  in the caller's process (the solve raises when it is off). The extra is
+  `[umbrella]` (mdtraj, pymbar).
+
+### Removed
+
+Everything below is at tag `v0.6.0`; `docs/design_decisions.md` gives the
+evidence for each item.
+
+- Weight solvers: plain BMC, PESB-EBMC, the full-Gram simplex and its three
+  boundary-error estimators, the diagonal RD weights, the Nitsche boundary
+  conditions, `compute_weights_multi` and both registries, `WeightingContext`,
+  `committor_dirichlet_energy`, `summarize_gram_diagnostics`, `why_masked`.
+- Ridge rules `cv`, `cv_refit`, `auto_lambda`, `auto_m`, and the tuple and
+  relative-float spellings.
+- Direction samplers: PCA, generalised-contrastive PCA, both TICA-EMA
+  factories, LDA by mean difference; `sweep_committor` and `SweepResult`.
+- The metric's `M0Kind`, `m0_atom`, `shrink_metric`, `torsion_g_matrix`,
+  `array_sha256`.
+- Rates: `dirichlet_rate`, `tpt_rate`, `berezhkovskii_szabo_rate`,
+  `kramers_rate`, `reactive_flux`, `diffusion_coefficient`,
+  `mapped_committor_diffusion`, `saddle_bridge_D`, `BridgeD`, the whole
+  bridge-v2 module (`flux_reductions`, `conditional_mean`,
+  `mapped_committor_diffusion_field`, `smooth_Ds_profile`,
+  `constancy_reconstruction`, `bootstrap_barrier_Ds`,
+  `bayesian_smoluchowski_diffusion`, `hummer_Ds_profile`,
+  `committor_grad_profile`, `committor_populations`), the `at=` selector.
+- The workflow orchestrator: the system registry (`config`), `loaders`,
+  `featurize`, `sweep`, `pipeline`, `report`, `plotting`, the
+  `sliced-committor-us` command, and the `pyyaml` and `matplotlib` extras.
+- The `recovar` research package.
+
+### Migration from 0.6.0
+
+| was | now |
+|---|---|
+| `compute_enriched_basin_moment_weights(res, X, sw, tik, **kw)` | `solve_weights(res, tikhonov=tik, **kw)` |
+| `weights["w"]`, `["c"]`, `["M_gap"]`, `["heldout_cap"]` | `weights.w`, `.c`, `.moment_gap`, `.heldout_cap` |
+| `fit_committor(weights="ebmc", weight_kwargs={"tikhonov": t})` | `fit_committor(tikhonov=t)` |
+| `tikhonov=<float>` (relative), `("ridge_abs", r)`, `"cv"`, `"auto_lambda"` | `tikhonov="halfset_eigen"`, `"auto"`, or an absolute float |
+| `build_committor(..., enforce_boundary_conditions=True, rescale_transition=True)` | `q = build_committor(res, w)`; `rescale_transition(q(X, in_A=, in_B=), in_A, in_B)` |
+| `evaluate_committor(res, pts, w, ...)` | `build_committor(res, w)(pts, in_A=, in_B=)` |
+| `DirectionSamplingConfig(mode="lda", lda_method="fisher")` | `DirectionSamplingConfig(mode="lda")` |
+| `sweep_committor(grid=...)` | `itertools.product` + `fit_committor(..., heldout_cap=True, return_details=True)` |
+| `density(q, X, coordinate=cv)` | `density(q(X))`, `density(cv, span=(lo, hi))` |
+| `diffusion_coefficient(q, traj, dt=, lag=None, method="hummer", per_window=)` | `diffusion_profile(q(traj), dt=, lag=)`, `hummer_diffusion(s, window_ids, dt=)`, `lag_scan` |
+| `mapped_committor_diffusion(q, X, D_s=, cv_grad_sq=)` | `committor_diffusion_from_cv(committor_grad_sq(q, X), D_s=, cv_grad_sq=)` |
+| `dirichlet_rate(q, X, D=D0)` | `committor_rate(q, X, D_q=committor_diffusion_from_cv(g_q, D_s=D0, cv_grad_sq=1), reduction="arithmetic")` |
+| `tpt_rate(q, X, D=D0, at=(lo, hi))` | the same with `reduction="plateau", band=(lo, hi)` |
+| `berezhkovskii_szabo_rate(mode="mfpt" / "local")` | `reduction="harmonic"` / `"local"` |
+| `committor_rate(q, X, traj, dt=, D_profile=D_q, at=...)` | `committor_rate(q, X, D_q=D_q, band= / q_star= / window=)` |
+| `reactive_flux(q, X, D=D)` | `committor_rate(...)["nu"]` |
+| `_cv_feature_grad_sq`, `hummer_pooled_acf` (reproduction package) | `linear_response_grad_sq`, `pooled_acf_diffusion` |
+| `workflows.{_containers, reweight, colvar, bias, trajectory, metric_inputs, committor_rates, pmf_kramers, _units}` | `umbrella.{dataset, reweight, io, io, io, mdtraj_metric, rates, rates}`, `rates.units` |
+| `fit_and_rate(direction_mode=, weight_solver=, diffusion_mode=, has_dynamics=, committor_sweep_grid=, solver_kwargs=, weight_kwargs=)` | `fit_and_rate(tikhonov=, diffusion=, D_s=, direction_sampling=, **solver_kwargs)` |
+
+## Pre-release history (never published)
+
+## [0.6.0] - 2026-08-03
 
 ### Added
 - **`sliced-committor-us --reference NAME=VALUE[:UNITS]`** (repeatable): plot custom

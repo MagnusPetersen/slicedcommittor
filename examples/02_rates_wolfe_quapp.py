@@ -1,33 +1,28 @@
-"""Reaction-rate computations on the rotated Wolfe-Quapp 2D potential.
+"""Reaction rates on the rotated Wolfe-Quapp 2D potential, against an exact reference.
 
-Companion to ``01_wolfe_quapp_2d.py`` (which builds the committor field). This
-script shows the full ``sliced_committor`` rate API on the same benchmark and
-cross-checks every method against an EXACT reference rate, so it doubles as an
-end-to-end test of the rate code:
+Companion to ``01_wolfe_quapp_2d.py``. The rate is a reduction of the
+committor-coordinate flux ``nu_R(q) = D_q(q) pi(q)``, and this script builds
+the pair ``{D_q, pi}`` every way the library offers, on one committor:
 
-    1. Committor in one call: ``q = fit_committor(samples, in_A=, in_B=)``.
-    2. Diffusion data: a window-stratified overdamped-Langevin swarm at a known
-       constant mobility D0 (β=1) seeded across the domain.
-    3. Three quantity primitives -- density π(q), diffusion D(q), reactive flux
-       Φ(q) -- each profiled along the committor coordinate.
-    4. Exact reference rate from the converged PDE committor:
-       ν_R* = D0·⟨|∇q|²⟩_π, k_AB* = ν_R*/ρ_A*.
-    5. The rate formulas vs that reference: the feature-space Dirichlet form and
-       TPT flux (which use the known D0), the coordinate-invariant committor_rate
-       (its harmonic / local reductions ARE Berezhkovskii-Szabo MFPT / local),
-       and a Kramers harmonic estimate.
-    6. A printed comparison table + a four-panel figure.
+    1. The committor in one call, ``fit_committor``.
+    2. Dynamics: a window-stratified overdamped-Langevin swarm at a known
+       mobility D0 (short independent segments seeded everywhere, since a
+       single unbiased trajectory almost never visits the ~5.5 kT barrier).
+    3. The static ensemble: the density pi(q), the populations, and the
+       iso-committor mean squared gradient <|grad q|^2>_q (the co-area profile).
+    4. Three constructors of D_q:
+         (a) measured on the committor: Kramers-Moyal at an explicit lag,
+             after a lag scan;
+         (b) mapped from the collective variable x through the Jacobian:
+             D measured along x (which recovers D0 exactly, the estimator
+             check), times <|grad q|^2>_q / <|grad x|^2>;
+         (c) the assumed configurational D0, the same map with cv_grad_sq = 1.
+    5. The four reductions of each, the flatness of each flux, the
+       committor-free Kramers baseline along x, and the exact
+       transition-path-theory rate from the converged PDE committor.
+    6. A printed table with PASS/FAIL self-checks, and a four-panel figure.
 
-Why a swarm rather than one long trajectory: the WQ barrier is ~5.5 kT above
-A, so a single unbiased trajectory almost never visits the saddle. The mobility
-is constant, so the drift-corrected Kramers-Moyal estimator recovers D0 from
-short independent segments seeded everywhere (the realistic "swarm / umbrella"
-case) -- ``window_ids`` keeps frame pairs within a segment.
-
-The rate functions themselves are jax+numpy only; this example additionally
-uses matplotlib + scipy (install with ``pip install -e .[examples]``).
-
-Runtime on CPU: ~2-3 minutes (committor + swarm ~30-60 s, PDE baseline ~90 s).
+Runtime on CPU: about 2-3 minutes (committor and swarm ~30-60 s, PDE ~90 s).
 
 Run:
     python 02_rates_wolfe_quapp.py
@@ -39,10 +34,8 @@ import jax
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Float64 is required for the EBMC / full-Gram constrained solves.
 jax.config.update("jax_enable_x64", True)
 
-# Shared Wolfe-Quapp scaffolding (see 01_wolfe_quapp_2d.py / _wolfe_quapp.py).
 from _wolfe_quapp import (
     BETA,
     CENTRE_A,
@@ -61,302 +54,190 @@ from _wolfe_quapp import (
 )
 
 import sliced_committor as sc
+from sliced_committor.rates.baselines import pmf_kramers_rate
 
 apply_paper_style()
 
-
-# ============================================================================
-# 0. Settings
-# ============================================================================
-# Many samples: the flux integrand D|∇q̄|²·π peaks at the barrier where π is tiny.
-N_SAMPLES = 100_000
-D0 = 0.05  # constant mobility of the overdamped dynamics (β = 1)
-
-# Window-stratified Langevin swarm for D(q). Short independent segments seeded
-# across the domain so every committor bin fills.
+N_SAMPLES = 100_000  # the flux integrand peaks at the barrier, where pi is tiny
+D0 = 0.05  # the mobility of the overdamped dynamics (beta = 1)
 SWARM_DT = 5e-3
 SWARM_SEG_LEN = 80
-SWARM_N_BASIN = 2200  # seeds drawn from the equilibrium ensemble (basins)
-SWARM_N_PATH = 800  # seeds along the A->B line (the barrier tube)
-RATE_N_BINS = 60  # coordinate bins for D(x) / π in the rate formulas
-FLUX_N_BINS = 30  # iso-committor bins for Φ(q̄) (coarser -> smoother)
-PLATEAU = (0.3, 0.7)  # iso-committor plateau for TPT / range Dirichlet
+SWARM_N_BASIN = 2200  # seeds drawn from the equilibrium ensemble
+SWARM_N_PATH = 800  # seeds along the A -> B line (the barrier tube)
+N_BINS = 30  # the committor grid of the profiles and the reductions
+BAND = (0.3, 0.7)  # the plateau band
+REDUCTIONS = ("plateau", "arithmetic", "harmonic", "local")
 
 
-# ============================================================================
-# 1. Overdamped Langevin swarm  ->  (trajectory, window_ids)
-# ============================================================================
 def langevin_swarm(seeds, *, dt=SWARM_DT, seg_len=SWARM_SEG_LEN, seed=SEED):
-    """Vectorised Euler-Maruyama: one short independent segment per seed.
+    """Euler-Maruyama, one short independent segment per seed; segment-major frames.
 
-    Overdamped Langevin at β = 1 and mobility D0:
-        x <- x - D0 ∇U(x) dt + sqrt(2 D0 dt) η ,   η ~ N(0, I).
-    Stationary density ∝ exp(-U) (matches the Boltzmann sampler); the constant
-    diffusion coefficient is D0. Returns ``(traj, window_ids)`` with the frames
-    laid out segment-major (each segment contiguous) so within-window
-    Kramers-Moyal pairs are adjacent.
+    x <- x - D0 grad U(x) dt + sqrt(2 D0 dt) eta: the stationary density is exp(-U)
+    and the diffusion coefficient of every coordinate is D0.
     """
     rng = np.random.default_rng(seed)
-    seeds = np.asarray(seeds, dtype=np.float64)
-    n_seg = seeds.shape[0]
+    state = np.asarray(seeds, dtype=np.float64).copy()
+    n_seg = state.shape[0]
     noise = np.sqrt(2.0 * D0 * dt)
-    state = seeds.copy()
-    frames = np.empty((n_seg, seg_len, 2), dtype=np.float64)
+    frames = np.empty((n_seg, seg_len, 2))
     for t in range(seg_len):
         frames[:, t] = state
         state = state - D0 * potential_grad(state) * dt + noise * rng.standard_normal((n_seg, 2))
-    traj = frames.reshape(n_seg * seg_len, 2)  # segment-major
-    window_ids = np.repeat(np.arange(n_seg), seg_len)
-    return traj, window_ids
+    return frames.reshape(n_seg * seg_len, 2), np.repeat(np.arange(n_seg), seg_len)
 
 
-# ============================================================================
-# 2. Exact reference rate from the converged PDE committor
-# ============================================================================
 def exact_reference_rate():
-    """ν_R* = D0·⟨|∇q|²⟩_π and k_AB* from the weighted-Jacobi PDE committor.
-
-    This is the gold standard: the exact transition-path-theory rate of the
-    overdamped dynamics at mobility D0, computed on the grid (no sampling).
-    """
+    """The exact TPT rate of the overdamped dynamics: nu_R* = D0 <|grad q|^2>_pi on the PDE committor."""
     q_pde, X, Y, iters, delta = jacobi_committor_2d()
     rho = np.exp(-BETA * potential(X, Y))
     Z = float(rho.sum())
-    dx = float(X[0, 1] - X[0, 0])
-    dy = float(Y[1, 0] - Y[0, 0])
-    gy, gx = np.gradient(q_pde, dy, dx)  # axis0 = y, axis1 = x
-    grad2 = gx**2 + gy**2
-    nu_R = D0 * float(np.sum(rho * grad2)) / Z
+    gy, gx = np.gradient(q_pde, float(Y[1, 0] - Y[0, 0]), float(X[0, 1] - X[0, 0]))
+    nu_R = D0 * float(np.sum(rho * (gx**2 + gy**2))) / Z
     rho_B = float(np.sum(rho * q_pde)) / Z
-    rho_A = 1.0 - rho_B
     return {
         "nu_R": nu_R,
-        "rho_A": rho_A,
+        "rho_A": 1.0 - rho_B,
         "rho_B": rho_B,
-        "k_AB": nu_R / rho_A,
-        "k_BA": nu_R / rho_B,
+        "k_AB": nu_R / (1.0 - rho_B),
         "pde_iters": iters,
         "pde_delta": delta,
     }
 
 
-# ============================================================================
-# Helpers for the printed table
-# ============================================================================
-def _rel(k, k_ref):
+def rel(k, k_ref):
     return abs(k - k_ref) / max(abs(k_ref), 1e-30)
 
 
-def _row(name, d, k_ref):
-    nu = d.get("nu_R", float("nan"))
-    return (
-        f"  {name:<26s} {nu:>10.4g} {d['rho_A']:>8.3f} "
-        f"{d['k_AB']:>11.4g} {_rel(d['k_AB'], k_ref):>9.1%}"
-    )
-
-
-# ============================================================================
-# Main
-# ============================================================================
 def main():
     # ------------------------------------------------------------------------
-    # Step 1: samples + basin masks, then the committor in ONE call.
+    # 1. the committor
     # ------------------------------------------------------------------------
-    print(f"[1] fit_committor on {N_SAMPLES:,} samples (M={N_DIRECTIONS}, EBMC)...")
+    print(f"[1] fit_committor on {N_SAMPLES:,} samples (M={N_DIRECTIONS})...")
     samples = boltzmann_samples(n_samples=N_SAMPLES)
     in_A = np.linalg.norm(samples - CENTRE_A, axis=1) < STATE_RADIUS
     in_B = np.linalg.norm(samples - CENTRE_B, axis=1) < STATE_RADIUS
-    q = sc.fit_committor(
+    q, fit = sc.fit_committor(
         samples,
         in_A=in_A,
         in_B=in_B,
         n_directions=N_DIRECTIONS,
         seed=SEED,
+        return_details=True,
         **SOLVER_KWARGS,
     )
-    print(
-        f"    callable committor ready; q(centreA)={float(q(CENTRE_A)):.3f}, "
-        f"q(centreB)={float(q(CENTRE_B)):.3f}, q(0,0)={float(q(np.zeros(2))):.3f}"
-    )
+    print(f"    Dirichlet energy {fit.dirichlet_energy:.5f}; q(0, 0) = {float(q(np.zeros(2))):.3f}")
 
     # ------------------------------------------------------------------------
-    # Step 2: window-stratified Langevin swarm for the diffusion estimate.
+    # 2. dynamics with a known mobility
     # ------------------------------------------------------------------------
     print(
-        f"\n[2] Langevin swarm (D0={D0}): "
-        f"{SWARM_N_BASIN}+{SWARM_N_PATH} seeds x {SWARM_SEG_LEN} steps..."
+        f"\n[2] Langevin swarm (D0={D0}): {SWARM_N_BASIN}+{SWARM_N_PATH} seeds x {SWARM_SEG_LEN} steps..."
     )
     rng = np.random.default_rng(SEED)
-    basin_seeds = samples[rng.choice(N_SAMPLES, size=SWARM_N_BASIN, replace=False)]
-    s = np.linspace(0.0, 1.0, SWARM_N_PATH)[:, None]
-    path_seeds = (1.0 - s) * CENTRE_A[None, :] + s * CENTRE_B[None, :]  # A -> B line
-    seeds = np.concatenate([basin_seeds, path_seeds], axis=0)
+    seeds = np.concatenate(
+        [
+            samples[rng.choice(N_SAMPLES, size=SWARM_N_BASIN, replace=False)],
+            (1.0 - np.linspace(0.0, 1.0, SWARM_N_PATH)[:, None]) * CENTRE_A
+            + np.linspace(0.0, 1.0, SWARM_N_PATH)[:, None] * CENTRE_B,
+        ]
+    )
     traj, wids = langevin_swarm(seeds)
     print(f"    trajectory: {traj.shape[0]:,} frames in {int(wids.max()) + 1} windows")
 
     # ------------------------------------------------------------------------
-    # Step 3: the three quantity primitives. density / flux are profiled along
-    # the committor; diffusion is profiled along the physical CV x (see below).
+    # 3. the static ensemble
     # ------------------------------------------------------------------------
-    print("\n[3] Quantity primitives:")
-    cv_s = np.asarray(samples)[:, 0]  # collective variable: the x coordinate
-    cv_t = traj[:, 0]
-    pi_prof = sc.density(q, samples, n_bins=RATE_N_BINS)
-    # Diffusion along x: the x-marginal of the overdamped dynamics has diffusion
-    # D0 for ANY potential, so D(x) recovers the known input -- the estimator
-    # test. (Profiled along the committor instead it would give the q*-dependent
-    # D(q̄) = D0·|∇q̄|², which is what Berezhkovskii-Szabo consumes internally.)
-    D_prof = sc.diffusion_coefficient(
-        q,
-        traj,
-        dt=SWARM_DT,
-        coordinate=cv_t,
-        window_ids=wids,
-        lag=1,
-        n_bins=RATE_N_BINS,
-    )
-    phi_prof = sc.reactive_flux(q, samples, D=D0, n_bins=FLUX_N_BINS)
-    # density along the same CV, to show coordinate= on a second primitive.
-    pi_cv = sc.density(q, samples, coordinate=cv_s, n_bins=RATE_N_BINS)
+    print("\n[3] The static ensemble:")
+    qx = np.asarray(q(samples))
+    pi = sc.density(qx, n_bins=N_BINS)
+    rho_A, rho_B = sc.basin_populations(qx, in_A=in_A, in_B=in_B)
+    g_q = sc.committor_grad_sq(q, samples, n_bins=N_BINS)
     print(
-        f"    density π(q̄): {int((pi_prof.counts > 0).sum())}/{RATE_N_BINS} bins, "
-        f"∫π dq ≈ {float(np.nansum(pi_prof.values) * (pi_prof.levels[1] - pi_prof.levels[0])):.3f}"
+        f"    rho_A = {rho_A:.3f}, rho_B = {rho_B:.3f}; "
+        f"<|grad q|^2>_q spans {np.nanmin(g_q.values):.3g} .. {np.nanmax(g_q.values):.3g}"
     )
-    print(f"    density π(x):  {int((pi_cv.counts > 0).sum())}/{RATE_N_BINS} bins (coordinate=x)")
 
-    # diffusion-recovery self-check: D(x) recovers the constant input mobility D0.
-    good = (D_prof.counts > 0) & np.isfinite(D_prof.values)
-    D_med = float(np.nanmedian(D_prof.values[good])) if np.any(good) else float("nan")
+    # ------------------------------------------------------------------------
+    # 4. three constructors of D_q
+    # ------------------------------------------------------------------------
+    print("\n[4] The committor-coordinate diffusion, three ways:")
+    qt = np.asarray(q(traj))
+    scan = sc.lag_scan(
+        qt, dt=SWARM_DT, lags=(1, 2, 5, 10), window_ids=wids, n_bins=N_BINS, band=BAND
+    )
     print(
-        f"    diffusion D(x): median = {D_med:.4f}  (input D0 = {D0}; "
-        f"rel.err {_rel(D_med, D0):.1%}) [KM estimator recovers the mobility]"
+        "    (a) lag scan of D_q on the band: "
+        + ", ".join(f"lag {int(L)}: {v:.4f}" for L, v in zip(scan.levels, scan.values))
     )
+    D_q = {"measured": sc.diffusion_profile(qt, dt=SWARM_DT, lag=1, window_ids=wids, n_bins=N_BINS)}
 
-    # reactive-flux flatness self-check (TPT flux conservation on the plateau).
-    sel = (phi_prof.levels >= PLATEAU[0]) & (phi_prof.levels <= PLATEAU[1]) & (phi_prof.counts > 0)
-    phi_flat = float(np.std(phi_prof.values[sel]) / max(abs(np.mean(phi_prof.values[sel])), 1e-30))
-    print(f"    reactive flux Φ(q): plateau flatness on {PLATEAU} = {phi_flat:.3f}")
+    x_t = traj[:, 0]
+    D_x = sc.diffusion_profile(
+        x_t, dt=SWARM_DT, lag=1, window_ids=wids, n_bins=N_BINS, span=(x_t.min(), x_t.max())
+    )
+    D_s = float(np.nanmedian(D_x.values))
+    g_s = sc.linear_response_grad_sq(samples[:, 0], samples)  # x is a feature: exactly 1
+    print(
+        f"    (b) D along x: median {D_s:.4f} (input D0 = {D0}, {rel(D_s, D0):.1%} off); <|grad x|^2> = {g_s:.4f}"
+    )
+    D_q["mapped"] = sc.committor_diffusion_from_cv(g_q, D_s=D_s, cv_grad_sq=g_s)
+    D_q["assumed"] = sc.committor_diffusion_from_cv(g_q, D_s=D0, cv_grad_sq=1.0)
+    print("    (c) the assumed D0 through the same map")
 
     # ------------------------------------------------------------------------
-    # Step 4: exact reference rate from the PDE committor.
+    # 5. the reductions, the baseline, and the exact rate
     # ------------------------------------------------------------------------
-    print("\n[4] Exact reference rate (converged PDE committor)...")
+    print("\n[5] Exact reference from the PDE committor...")
     ref = exact_reference_rate()
-    print(f"    PDE converged in {ref['pde_iters']:,} iters (max|dq|={ref['pde_delta']:.1e})")
-    print(f"    ν_R* = {ref['nu_R']:.4g}, ρ_A* = {ref['rho_A']:.3f}, k_AB* = {ref['k_AB']:.4g}")
-
-    # ------------------------------------------------------------------------
-    # Step 5: the rate methods.
-    # ------------------------------------------------------------------------
-    print("\n[5] Rate methods...")
-    r_dir = sc.dirichlet_rate(q, samples, D=D0, in_A=in_A, in_B=in_B)
-    r_dir_band = sc.dirichlet_rate(q, samples, D=D0, at=PLATEAU, in_A=in_A, in_B=in_B)
-    r_tpt = sc.tpt_rate(q, samples, D=D0, at=PLATEAU, in_A=in_A, in_B=in_B, n_bins=FLUX_N_BINS)
-    r_bs_loc = sc.berezhkovskii_szabo_rate(
-        q,
-        samples,
-        traj,
-        dt=SWARM_DT,
-        window_ids=wids,
-        mode="local",
-        at=0.5,
-        n_bins=RATE_N_BINS,
-        lag=1,
-        in_A=in_A,
-        in_B=in_B,
-    )
-    r_bs_mfpt = sc.berezhkovskii_szabo_rate(
-        q,
-        samples,
-        traj,
-        dt=SWARM_DT,
-        window_ids=wids,
-        mode="mfpt",
-        at=None,
-        n_bins=RATE_N_BINS,
-        lag=1,
-        in_A=in_A,
-        in_B=in_B,
-    )
-    # Kramers needs interior free-energy wells: use the physical CV x (the two
-    # WQ minima sit near x = ±1.7, a genuine double well), not the bare committor.
-    r_kram = sc.kramers_rate(
-        q,
-        samples,
-        traj,
-        dt=SWARM_DT,
-        window_ids=wids,
-        n_bins=RATE_N_BINS,
-        coordinate=cv_s,
-        traj_coordinate=cv_t,
-        lag=1,
-        in_A=in_A,
-        in_B=in_B,
-    )
-    # committor_rate is the coordinate-invariant UNIFIED interface: it reduces the
-    # same {D_q(q), π(q)} pair four ways and needs NO length-scale D (so it works
-    # in any feature space, unlike Dirichlet / TPT). On the committor coordinate
-    # its "harmonic" / "local" reductions ARE Berezhkovskii-Szabo mfpt / local;
-    # the spread across reductions is a committor-quality diagnostic (they all
-    # coincide for the exact committor). For real systems with no trusted D this
-    # is the recommended path. (find_plateau / saddle_bridge_D extend it; see
-    # docs/recipes.md.)
-    cr = {
-        red: sc.committor_rate(
-            q, samples, traj, dt=SWARM_DT, window_ids=wids, reduction=red,
-            n_bins=RATE_N_BINS, lag=1, in_A=in_A, in_B=in_B,
-        )["k_AB"]
-        for red in ("arithmetic", "plateau", "local", "harmonic")
-    }
-
-    # ------------------------------------------------------------------------
-    # Step 6: comparison table.
-    # ------------------------------------------------------------------------
     k_ref = ref["k_AB"]
-    print("\n[6] Rate comparison (k_AB* = exact PDE reference):\n")
-    print(f"  {'method':<26s} {'nu_R':>10s} {'rho_A':>8s} {'k_AB':>11s} {'rel.err':>9s}")
-    print("  " + "-" * 67)
     print(
-        f"  {'exact (PDE)':<26s} {ref['nu_R']:>10.4g} {ref['rho_A']:>8.3f} "
-        f"{k_ref:>11.4g} {'--':>9s}"
+        f"    PDE converged in {ref['pde_iters']:,} iterations; nu_R* = {ref['nu_R']:.4g}, k_AB* = {k_ref:.4g}"
     )
-    print(_row("Dirichlet (full)", r_dir, k_ref))
-    print(_row("Dirichlet (0.3-0.7)", r_dir_band, k_ref))
-    print(_row("TPT flux (plateau)", r_tpt, k_ref))
-    print(_row("Berezhkovskii-Szabo loc", r_bs_loc, k_ref))
-    print(_row("Berezhkovskii-Szabo mfpt", r_bs_mfpt, k_ref))
-    print(_row("Kramers (CV=x)", r_kram, k_ref))
-    print(
-        f"\n    TPT plateau flatness = {r_tpt.get('plateau_flatness', float('nan')):.3f}; "
-        f"Kramers ΔF_AB = {r_kram['delta_F_AB']:.2f} kT, "
-        f"D_barrier = {r_kram['D_barrier']:.4f}"
-    )
-    print("    Variational flux (Dirichlet/TPT) and Berezhkovskii-Szabo local land within")
-    print("    ~5-25% of k_AB*; the BS-MFPT integral and the 1D Kramers harmonic estimate")
-    print("    are tail / CV-sensitive -> a factor of ~2-6 (order of magnitude).")
-    print("\n    committor_rate reductions (coordinate-invariant, no D supplied):")
-    print("      " + "   ".join(f"{r}={v:.4g}" for r, v in cr.items()))
-    print("      harmonic == B-Szabo mfpt, local == B-Szabo local; the reduction")
-    print("      spread is a committor-quality diagnostic (all equal for exact q).")
 
-    # ------------------------------------------------------------------------
-    # Step 7: self-checks (the example doubles as an integration test of the
-    # rate code; the unit tests in sliced_committor/tests cover the rest).
-    # ------------------------------------------------------------------------
+    rates = {
+        name: {red: sc.rate_from_profiles(pi, D, rho_A, rho_B, reduction=red) for red in REDUCTIONS}
+        for name, D in D_q.items()
+    }
+    x_s = samples[:, 0]
+    pi_x = sc.density(x_s, n_bins=60, span=(x_s.min(), x_s.max()))
+    kramers = pmf_kramers_rate(pi_x, D_x)
+
+    print(f"\n[6] k_AB per constructor and reduction (exact k_AB* = {k_ref:.4g}):\n")
+    print(
+        f"  {'D_q':<10s}"
+        + "".join(f"{r:>14s}" for r in REDUCTIONS)
+        + f"{'flatness':>10s}{'flux_cv':>9s}"
+    )
+    print("  " + "-" * 79)
+    for name, by_red in rates.items():
+        cells = "".join(
+            f"{by_red[r]['k_AB']:>8.4g} {rel(by_red[r]['k_AB'], k_ref):>5.0%}" for r in REDUCTIONS
+        )
+        flat = by_red["plateau"]["flatness"]
+        cv = sc.flux_flatness(by_red["plateau"]["nu"], (0.2, 0.8))
+        print(f"  {name:<10s}{cells}{flat:>10.3f}{cv:>9.3f}")
+    print(
+        f"  {'Kramers (x)':<10s}{kramers['k_AB']:>8.4g} {rel(kramers['k_AB'], k_ref):>5.0%}"
+        f"   (delta F = {kramers['delta_F_AB']:.2f} kT, D at the barrier {kramers['D_barrier']:.4f})"
+    )
+    print("\n    All reductions coincide for the exact committor; their spread and the")
+    print("    flatness of the flux measure how far the fitted committor is from it.")
+
+    k_map = rates["mapped"]["plateau"]["k_AB"]
+    k_ass = rates["assumed"]["plateau"]["k_AB"]
     checks = [
-        (f"D(x) recovers D0          ({_rel(D_med, D0):>5.1%} <= 15%)", _rel(D_med, D0) <= 0.15),
-        (f"reactive-flux plateau flat ({phi_flat:>5.3f} <= 0.35)", phi_flat <= 0.35),
+        (f"D along x recovers D0            ({rel(D_s, D0):>5.1%} <= 15%)", rel(D_s, D0) <= 0.15),
         (
-            f"Dirichlet k_AB ~ exact    ({_rel(r_dir['k_AB'], k_ref):>5.1%} <= 30%)",
-            _rel(r_dir["k_AB"], k_ref) <= 0.30,
+            f"mapped plateau k_AB ~ exact      ({rel(k_map, k_ref):>5.1%} <= 30%)",
+            rel(k_map, k_ref) <= 0.30,
         ),
         (
-            f"TPT k_AB ~ exact          ({_rel(r_tpt['k_AB'], k_ref):>5.1%} <= 30%)",
-            _rel(r_tpt["k_AB"], k_ref) <= 0.30,
+            f"assumed-D0 plateau k_AB ~ exact  ({rel(k_ass, k_ref):>5.1%} <= 30%)",
+            rel(k_ass, k_ref) <= 0.30,
         ),
         (
-            "committor_rate harmonic == B-Szabo mfpt (unified interface)",
-            _rel(cr["harmonic"], r_bs_mfpt["k_AB"]) <= 1e-9,
+            f"flux flat on the band            ({rates['assumed']['plateau']['flatness']:>5.3f} <= 0.35)",
+            rates["assumed"]["plateau"]["flatness"] <= 0.35,
         ),
     ]
     print("\n[7] Self-checks:")
@@ -364,79 +245,64 @@ def main():
         print(f"    {'PASS' if ok else 'FAIL'}  {label}")
 
     # ------------------------------------------------------------------------
-    # Step 8: figure -- three quantity profiles + a rate bar chart.
+    # 8. the figure
     # ------------------------------------------------------------------------
     print("\n[8] Plotting...")
     fig, axes = plt.subplots(
         2, 2, figsize=(DOUBLE_COL, 4.8), gridspec_kw=dict(wspace=0.30, hspace=0.42)
     )
-    ax_pi, ax_D, ax_phi, ax_k = axes.ravel()
+    ax_pi, ax_D, ax_nu, ax_k = axes.ravel()
 
-    def _profile_plot(
-        ax,
-        prof,
-        title,
-        ylabel,
-        *,
-        xlabel=r"committor $\bar q$",
-        xlim=(0, 1),
-        ref_val=None,
-        ref_lab=None,
-    ):
-        good = prof.counts > 0
-        ax.plot(prof.levels[good], prof.values[good], color="0.15", marker="o", ms=2.0, lw=1.0)
-        if ref_val is not None:
-            ax.axhline(ref_val, color=HIGHLIGHT, ls="--", lw=1.0, label=ref_lab)
-            ax.legend(loc="best", fontsize=6, framealpha=0.85)
-        ax.set_title(title, pad=4)
-        ax.set_xlabel(xlabel, labelpad=1)
-        ax.set_ylabel(ylabel, labelpad=2)
-        ax.set_xlim(*xlim)
+    good = pi.counts > 0
+    ax_pi.plot(pi.levels[good], pi.values[good], color="0.15", marker="o", ms=2.0, lw=1.0)
+    ax_pi.set_title(r"(a) Density $\pi(\bar q)$", pad=4)
+    ax_pi.set_xlabel(r"committor $\bar q$", labelpad=1)
+    ax_pi.set_ylabel(r"$\pi$", labelpad=2)
+    ax_pi.set_xlim(0, 1)
 
-    _profile_plot(ax_pi, pi_prof, r"(a) Density $\pi(\bar q)$", r"$\pi$")
-    _profile_plot(
-        ax_D,
-        D_prof,
-        r"(b) Diffusion $D(x)$ recovers $D_0$",
-        r"$D$",
-        xlabel=r"CV $x$",
-        xlim=(cv_s.min(), cv_s.max()),
-        ref_val=D0,
-        ref_lab=rf"$D_0={D0}$",
-    )
+    goodD = D_x.counts > 0
+    ax_D.plot(D_x.levels[goodD], D_x.values[goodD], color="0.15", marker="o", ms=2.0, lw=1.0)
+    ax_D.axhline(D0, color=HIGHLIGHT, ls="--", lw=1.0, label=rf"$D_0 = {D0}$")
+    ax_D.set_title(r"(b) $D$ along $x$ recovers $D_0$", pad=4)
+    ax_D.set_xlabel(r"CV $x$", labelpad=1)
+    ax_D.set_ylabel(r"$D$", labelpad=2)
     ax_D.set_ylim(0, 3.0 * D0)
-    _profile_plot(
-        ax_phi,
-        phi_prof,
-        r"(c) Reactive flux $\Phi(\bar q)$",
-        r"$\Phi$",
-        ref_val=ref["nu_R"],
-        ref_lab=r"$\nu_R^{*}$ (PDE)",
-    )
-    ax_phi.axvspan(*PLATEAU, color="0.85", zorder=0)
+    ax_D.legend(loc="best", fontsize=6, framealpha=0.85)
 
-    # (d) k_AB per method vs the exact reference.
-    names = [
-        "Dirichlet\n(full)",
-        "TPT\n(plateau)",
-        "B-Szabo\n(local)",
-        "B-Szabo\n(mfpt)",
-        "Kramers\n(CV=x)",
-    ]
-    kvals = [r_dir["k_AB"], r_tpt["k_AB"], r_bs_loc["k_AB"], r_bs_mfpt["k_AB"], r_kram["k_AB"]]
+    for name, ls in (("measured", ":"), ("mapped", "--"), ("assumed", "-")):
+        nu = rates[name]["plateau"]["nu"]
+        ok = np.isfinite(nu.values) & (nu.values > 0)
+        ax_nu.plot(
+            nu.levels[ok],
+            nu.values[ok],
+            color="0.15",
+            ls=ls,
+            lw=1.0,
+            marker="o",
+            ms=1.8,
+            label=name,
+        )
+    ax_nu.axhline(ref["nu_R"], color=HIGHLIGHT, ls="--", lw=1.0, label=r"$\nu_R^{*}$ (PDE)")
+    ax_nu.axvspan(*BAND, color="0.85", zorder=0)
+    ax_nu.set_title(r"(c) Flux $\nu_R(\bar q) = D_q \pi$", pad=4)
+    ax_nu.set_xlabel(r"committor $\bar q$", labelpad=1)
+    ax_nu.set_ylabel(r"$\nu_R$", labelpad=2)
+    ax_nu.set_xlim(0, 1)
+    ax_nu.set_yscale("log")
+    ax_nu.legend(loc="best", fontsize=6, framealpha=0.85)
+
+    names = [f"{n}\n{r}" for n in D_q for r in ("plateau", "harmonic")] + ["Kramers\n(x)"]
+    kvals = [rates[n][r]["k_AB"] for n in D_q for r in ("plateau", "harmonic")] + [kramers["k_AB"]]
     xpos = np.arange(len(names))
-    # Log scale: the estimates span a decade (accurate methods hug k_AB*, the
-    # crude ones overshoot), unreadable on a linear axis dominated by Kramers.
     ax_k.bar(xpos, kvals, color="0.55", width=0.62, zorder=2)
     ax_k.axhline(
-        k_ref, color=HIGHLIGHT, ls="--", lw=1.0, label=rf"$k_{{AB}}^{{*}}={k_ref:.3g}$", zorder=3
+        k_ref, color=HIGHLIGHT, ls="--", lw=1.0, label=rf"$k_{{AB}}^{{*}} = {k_ref:.3g}$", zorder=3
     )
     ax_k.set_yscale("log")
-    ax_k.set_ylim(3e-4, 1.2 * max(kvals))
     ax_k.set_xticks(xpos)
-    ax_k.set_xticklabels(names, fontsize=6)
+    ax_k.set_xticklabels(names, fontsize=5.5)
     ax_k.set_ylabel(r"$k_{AB}$", labelpad=2)
-    ax_k.set_title("(d) Rate vs exact reference", pad=4)
+    ax_k.set_title("(d) Rate versus the exact reference", pad=4)
     ax_k.legend(loc="best", fontsize=6, framealpha=0.85)
 
     out = "02_rates_wolfe_quapp.png"

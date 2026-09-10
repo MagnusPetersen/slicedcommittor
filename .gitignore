@@ -18,3 +18,7 @@ htmlcov/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+# Research-only material lives at tag v0.6.0 (worktree ../lib-0.6); never here
+/recovar/
+/lib-0.6/

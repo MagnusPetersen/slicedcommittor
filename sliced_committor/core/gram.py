@@ -1,142 +1,121 @@
-"""Shared Gram-assembly primitives and diagnostics for the sliced committor.
+"""The slice Gram matrix and the feature-space metric it carries.
 
-Both the full-Gram simplex solver (:func:`sliced_committor.full_gram_weights`)
-and the basin-moment-constrained solver
-(:func:`sliced_committor.compute_basin_moment_weights`) share a single derivative
-pipeline, Gram assembler, and post-solve diagnostic block. Functions here
-duck-type ``ctx`` as anything with ``slice_coords``, ``committors_1d``, and
-``free_energies`` attributes so this module stays import-light (no circular
-dependency on the full ``WeightingContext`` definition in ``solver.py``).
+``G_jk = (theta_j^T Mbar theta_k) sum_n W_n q_j'(theta_j . x_n) q_k'(theta_k . x_n)``
+
+is the Dirichlet form of the slice basis: the cosine matrix of the directions
+in the feature-space metric ``Mbar`` (identity by default), Hadamard-multiplied
+by the sample average of the slice derivatives. The derivative of each slice
+committor is the piecewise-constant slope of its piecewise-linear interpolant,
+i.e. exactly the derivative of the function :func:`sliced_committor.build_committor`
+evaluates.
 """
+
+import warnings
 
 import jax.numpy as jnp
 from jax import jit, vmap
 
 
 @jit
-def _compute_derivative_matrix(ctx, projected_samples):
-    """Piecewise-constant derivative matrix F where F[j,n] = dq_j/ds(θ_j · x_n).
-
-    Uses the piecewise-constant slope of the linearly interpolated committor
-    (the exact derivative of the piecewise-linear interpolant used in
-    evaluate_committor), rather than central-diff + re-interpolation.
-
-    Precomputes slopes as (M, n_bins-1) and gathers via take_along_axis
-    to avoid per-sample division inside the vmap.
-
-    Args:
-        ctx: WeightingContext with slice_coords and committors_1d.
-        projected_samples: (M, N) pre-computed projections θ_j · x_n.
-
-    Returns:
-        F: (M, N) array of committor derivatives at sample positions.
-    """
-    # Precompute piecewise-constant slopes: (M, n_bins-1)
-    ds = jnp.diff(ctx.slice_coords, axis=1)
-    dq = jnp.diff(ctx.committors_1d, axis=1)
+def _compute_derivative_matrix(slice_coords, committors_1d, projected_samples):
+    """``F[j, n] = dq_j/ds`` at ``theta_j . x_n`` (piecewise-constant slopes, gathered)."""
+    ds = jnp.diff(slice_coords, axis=1)
+    dq = jnp.diff(committors_1d, axis=1)
     slopes = dq / jnp.maximum(ds, 1e-10)
-
-    n_bins = ctx.slice_coords.shape[1]
+    n_bins = slice_coords.shape[1]
 
     def _find_bins(s_grid, s_proj):
-        idx = jnp.searchsorted(s_grid, s_proj, side="right") - 1
+        idx = jnp.searchsorted(s_grid, s_proj, side="right", method="scan_unrolled") - 1
         return jnp.clip(idx, 0, n_bins - 2)
 
-    bin_indices = vmap(_find_bins)(ctx.slice_coords, projected_samples)  # (M, N)
-    return jnp.take_along_axis(slopes, bin_indices, axis=1)  # (M, N)
+    bin_indices = vmap(_find_bins)(slice_coords, projected_samples)
+    return jnp.take_along_axis(slopes, bin_indices, axis=1)
 
 
 @jit
 def _assemble_gram_matrix(F, W, cos_matrix):
-    """Assemble the cross-Dirichlet Gram matrix.
-
-    G_jk = cos_matrix_jk × Σ_n W_n F_jn F_kn
-
-    Args:
-        F: (M, N) derivative matrix. May be float32 or float64; the
-            (M, M) inner product is computed in F's dtype and upcast to
-            ``cos_matrix.dtype`` before the cosine factor is applied.
-        W: (N,) sample weights (normalised), same dtype as F.
-        cos_matrix: (M, M) = directions @ directions.T.
-
-    Returns:
-        G: (M, M) symmetric positive semi-definite Gram matrix in
-        ``cos_matrix.dtype``.
-    """
-    F_scaled = F * jnp.sqrt(W)[None, :]  # (M, N)
-    gram_inner = F_scaled @ F_scaled.T  # (M, M) in F's dtype
+    """``G = cos_matrix * (F sqrt(W)) (F sqrt(W))^T``, in ``cos_matrix``'s dtype."""
+    F_scaled = F * jnp.sqrt(W)[None, :]
+    gram_inner = F_scaled @ F_scaled.T
     return cos_matrix * gram_inner.astype(cos_matrix.dtype)
 
 
-def compute_shared_gram_diagnostics(result, G, valid_mask, ctx=None):
-    """Append shared Gram diagnostics to ``result`` in place.
+# ---------------------------------------------------------------------------
+# Feature-space metric: enters only through theta_j^T Mbar theta_k.
+# ---------------------------------------------------------------------------
 
-    Computes the diagnostics common to every Gram-based weight solver:
 
-      * ``n_negative_weights``, ``negative_weight_mass``: counts and total
-        signed mass of strictly-negative entries in ``result['w']``.
-      * ``off_diagonal_magnitude``: mean of ``|G_jk| / √(G_jj G_kk)`` over
-        the valid off-diagonal block. Near zero, the diagonal approximation
-        is essentially exact; near one, slices are highly correlated.
-      * ``diagonal_sanity``: per-slice ``|G_jj - D_matched_j| / D_matched_j``,
-        with ``D_matched_j = ∫ ρ_j (dq_j/ds)² ds`` computed against the
-        unit-integral density and the same piecewise-constant slopes as ``G``.
+_PSD_RTOL = 1e-10  # eigenvalues below -rtol * lam_max are not rounding
+_COND_WARN = 1e4
 
-    When ``ctx.free_energies`` is None, only the first two diagnostics are
-    populated; ``diagonal_sanity`` is filled with NaN.
 
-    Args:
-        result: dict to mutate (must contain ``'w'``).
-        G: (M, M) Gram matrix.
-        valid_mask: (M,) bool.
-        ctx: optional duck-typed context with ``free_energies``,
-            ``slice_coords``, ``committors_1d``.
-
-    Returns:
-        ``(D_matched_norm, valid_m)`` arrays for callers that want to
-        derive further diagnostics (e.g. ``R_M_ratio`` in the full-Gram
-        solver). Both are None when ``ctx`` lacks free energies.
-    """
-    M = G.shape[0]
-    valid = valid_mask
-    w = result["w"]
-
-    neg_mask = (w < 0) & valid
-    result["n_negative_weights"] = int(jnp.sum(neg_mask))
-    result["negative_weight_mass"] = float(jnp.sum(jnp.where(neg_mask, w, 0.0)))
-
-    G_diag = jnp.diag(G)
-    denom = jnp.sqrt(jnp.maximum(G_diag[:, None] * G_diag[None, :], 1e-30))
-    corr = jnp.abs(G / denom)
-    mask_offdiag = ~jnp.eye(M, dtype=bool) & valid[:, None] & valid[None, :]
-    n_offdiag = jnp.sum(mask_offdiag)
-    result["off_diagonal_magnitude"] = float(
-        jnp.where(
-            n_offdiag > 0,
-            jnp.sum(corr * mask_offdiag) / n_offdiag,
-            0.0,
+def validate_feature_metric(feature_metric, dim):
+    """Symmetrise, PSD-project and range-check a ``(dim, dim)`` metric; None passes through."""
+    if feature_metric is None:
+        return None
+    M = jnp.asarray(feature_metric)
+    M = M.astype(jnp.promote_types(M.dtype, jnp.zeros(0).dtype))
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError(f"feature_metric must be square (dim, dim); got shape {tuple(M.shape)}")
+    if int(M.shape[0]) != int(dim):
+        raise ValueError(
+            f"feature_metric has dim {int(M.shape[0])} but samples have dim {int(dim)}"
         )
-    )
+    if not bool(jnp.all(jnp.isfinite(M))):
+        raise ValueError("feature_metric contains non-finite entries (NaN or Inf).")
+    nrm = float(jnp.linalg.norm(M))
+    if nrm <= 0.0:
+        raise ValueError("feature_metric is all zeros; it must be positive semi-definite.")
+    asym = float(jnp.linalg.norm(M - M.T)) / nrm
+    if asym > 1e-8:
+        raise ValueError(
+            f"feature_metric is not symmetric (||M - M^T||/||M|| = {asym:.3e}). "
+            "A diffusion tensor is symmetric by construction; check the assembly."
+        )
+    M = 0.5 * (M + M.T)
+    lam = jnp.linalg.eigvalsh(M)
+    lam_min, lam_max = float(lam[0]), float(lam[-1])
+    if lam_min < -_PSD_RTOL * max(lam_max, 1.0):
+        raise ValueError(
+            f"feature_metric is not positive semi-definite (min eigenvalue {lam_min:.3e} "
+            f"vs max {lam_max:.3e}). A diffusion tensor must be PSD."
+        )
+    if lam_max <= 0.0:
+        raise ValueError("feature_metric has no positive eigenvalue.")
+    cond = lam_max / lam_min if lam_min > 0 else float("inf")
+    if cond > _COND_WARN:
+        warnings.warn(
+            f"feature_metric is ill-conditioned (cond = {cond:.3e} > {_COND_WARN:.1e}); "
+            "diag(G) then spans that range. The half-set filter (the default tikhonov) "
+            "regularises band by band and copes; a scalar ridge does not.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return M
 
-    if ctx is None or ctx.free_energies is None:
-        result["diagonal_sanity"] = jnp.full(M, jnp.nan)
-        return None, None
 
-    F = ctx.free_energies
-    s = ctx.slice_coords
-    F_min = jnp.min(F, axis=1, keepdims=True)
-    rho = jnp.exp(-(F - F_min))
-    ds = jnp.diff(s, axis=1)
-    rho_mid = 0.5 * (rho[:, :-1] + rho[:, 1:])
-    Z_rel = jnp.sum(rho_mid * ds, axis=1)
-    dq = jnp.diff(ctx.committors_1d, axis=1)
-    slopes = dq / jnp.maximum(ds, 1e-30)
-    D_matched = jnp.sum(slopes**2 * rho_mid * ds, axis=1)
-    D_matched_norm = jnp.where(Z_rel > 1e-30, D_matched / Z_rel, D_matched)
-    valid_m = valid & jnp.isfinite(D_matched_norm) & (D_matched_norm > 1e-30)
-    result["diagonal_sanity"] = jnp.where(
-        valid_m,
-        jnp.abs(G_diag - D_matched_norm) / D_matched_norm,
-        jnp.nan,
-    )
-    return D_matched_norm, valid_m
+def metric_factor(feature_metric):
+    """``(d, d)`` factor ``S`` with ``S S^T = Mbar``; None passes through.
+
+    ``eigh`` rather than ``cholesky``: a pulled-back metric can be
+    rank-deficient (a sin/cos pull-back has per-frame rank d/2). An exact
+    identity short-circuits so ``feature_metric=eye(d)`` is bit-identical to None.
+    """
+    if feature_metric is None:
+        return None
+    M = jnp.asarray(feature_metric)
+    d = int(M.shape[0])
+    if bool(jnp.array_equal(M, jnp.eye(d, dtype=M.dtype))):
+        return jnp.eye(d, dtype=M.dtype)
+    lam, V = jnp.linalg.eigh(0.5 * (M + M.T))
+    return V * jnp.sqrt(jnp.maximum(lam, 0.0))[None, :]
+
+
+def cos_matrix_from_metric(directions, feature_metric=None):
+    """``(M, M)`` matrix of ``theta_j^T Mbar theta_k``, assembled as ``(Theta S)(Theta S)^T``
+    so it is PSD in floating point; None gives ``directions @ directions.T`` verbatim."""
+    Theta = jnp.asarray(directions)
+    if feature_metric is None:
+        return Theta @ Theta.T
+    Y = Theta @ metric_factor(feature_metric).astype(Theta.dtype)
+    return Y @ Y.T
