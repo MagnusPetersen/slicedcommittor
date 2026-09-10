@@ -45,16 +45,18 @@ basis, the weights under both ridge rules, the half-set regularised Gram
 matrices and the held-out cap on a two-basin fixture and on the paper's
 Wolfe-Quapp benchmark. The script that produced them,
 `freeze_1_0_references.py`, sits beside them as their provenance, and they
-were produced with JAX 0.5.3. The tests first check whether the running
-environment reproduces the frozen slice basis bit for bit (the same JAX on
-a machine that rounds like the one that froze it) and then hold the
-half-set weights to the bit and the scalar-ridge weights to `1e-13`;
-anywhere else they compare the committor values, the half-set weights and
-the scalar summaries at the measured drift of the table above, with a
-margin, so a real change of the numerics still fails, and leave the
-ill-conditioned intermediates alone. `SLICED_COMMITTOR_GOLDEN_TIER` set to
-`strict` or `drift` overrides the detection. CI runs the drift tier on the
-newest JAX and on the oldest supported one.
+were produced with JAX 0.5.3. On that machine with that JAX, and only
+there, the tests hold the half-set weights to the bit and the scalar-ridge
+weights to `1e-13`: the strict tier, selected with
+`SLICED_COMMITTOR_GOLDEN_TIER=strict`, the release gate. No probe can
+certify another machine in advance (a GitHub runner reproduced the
+32-direction fixture bit for bit and the 64-direction solve at `1e-3`,
+from the BLAS kernels), so by default, CI included, the drift tier runs:
+it compares the committor values, the half-set weights and the scalar
+summaries at the measured drift of the table above, with a margin, so a
+real change of the numerics still fails, and leaves the ill-conditioned
+intermediates alone. CI runs it on the newest JAX and on the oldest
+supported one.
 
 ## The paper
 

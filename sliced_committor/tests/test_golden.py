@@ -14,13 +14,14 @@ Two tiers. The STRICT tier is the release gate: the half-set path, the
 paper's, bit for bit, the ``auto`` ridge and the basis to rounding. It holds
 in the environment that produced the references, jax ``0.5.3``
 (``FROZEN_JAX``) on the machine that froze them, and only there: XLA
-compiles for the host CPU and the BLAS kernels are chosen by it, so another
-machine rounds the last bit differently even with the same versions. The
-``strict`` fixture detects that environment by reproducing the frozen slice
-basis bit for bit; ``SLICED_COMMITTOR_GOLDEN_TIER=strict|drift`` overrides
-the detection.
+compiles for the host CPU and the BLAS kernels are chosen by it and by the
+matrix size, so another machine rounds the last bit differently even with
+the same versions (a GitHub runner reproduced the 32-direction fixture bit
+for bit and the 64-direction Wolfe-Quapp solve at ``1e-3``). No probe can
+certify that in advance, so the strict tier is selected explicitly:
+``SLICED_COMMITTOR_GOLDEN_TIER=strict`` on the freezing machine.
 
-Everywhere else the DRIFT tier runs. Two mechanisms carry the last bit of
+By default, CI included, the DRIFT tier runs. Two mechanisms carry the last bit of
 rounding into the weights, neither of them a bug: a sample whose projection
 coincides with a grid point of its slice (quantile bins are built from the
 sample values, so duplicated frames put bin centres exactly on samples; the
@@ -78,6 +79,8 @@ _TIERS = {
     "reference": (dict(rtol=1e-8, atol=0.0), dict(rtol=0.0, atol=1e-3)),
     "reference_scalar": (dict(rtol=1e-8, atol=0.0), dict(rtol=5e-2, atol=0.0)),
     "reference_ssnr": (dict(rtol=1e-10, atol=0.0), None),
+    "regulariser": (dict(rtol=1e-10, atol=1e-14), dict(rtol=1e-2, atol=1e-6)),
+    "regulariser_ssnr": (dict(rtol=1e-10, atol=0.0), None),
 }
 
 
@@ -98,23 +101,10 @@ def basis(golden_samples, golden_labels):
 
 
 @pytest.fixture(scope="module")
-def strict(basis, golden_data):
-    """Whether this environment reproduces the frozen slice basis bit for bit:
-    the directions, the slice grids and the 1D free energies, which are what
-    decides every bin assignment downstream (the 1D committors themselves
-    carry the solver's own rounding, ``1e-13`` against the 0.6.0 solver that
-    froze them, and are held to rounding in both tiers)."""
-    forced = os.environ.get(TIER_ENV)
-    if forced in ("strict", "drift"):
-        return forced == "strict"
-    return jax.__version__ == FROZEN_JAX and all(
-        np.array_equal(np.asarray(getattr(basis, name)), golden_data[key])
-        for name, key in (
-            ("directions", "directions"),
-            ("slice_coords", "slice_coords"),
-            ("free_energies", "log_density (= -β·F)"),
-        )
-    )
+def strict():
+    """The strict tier, selected with ``SLICED_COMMITTOR_GOLDEN_TIER=strict`` on
+    the machine that froze the references (with jax ``FROZEN_JAX``)."""
+    return os.environ.get(TIER_ENV) == "strict"
 
 
 @pytest.fixture(scope="module")
@@ -130,10 +120,10 @@ def check(strict):
             close(got, ref, **tol)
         except AssertionError as exc:
             hint = (
-                "strict tier: differs from the frozen reference. Expected on a machine or JAX "
-                "build that does not reproduce the frozen slice basis bit for bit (or from a "
-                f"BLAS/LAPACK kernel difference); {TIER_ENV}=drift compares at the measured "
-                "cross-environment drift instead. Otherwise a real change of the numerics."
+                f"strict tier ({TIER_ENV}=strict): differs from the frozen reference. On the "
+                f"machine that froze it with jax {FROZEN_JAX} this is a real change of the "
+                "numerics; anywhere else it is the machine's rounding, and the default drift "
+                "tier is the comparison to make."
                 if strict
                 else "drift tier: beyond the measured cross-environment drift, a real change"
             )
@@ -195,13 +185,16 @@ def test_heldout_cap_matches_golden(basis, check):
 # --------------------------------------------------------------------------- #
 # the eigenband regulariser against the prototype it was ported from
 # --------------------------------------------------------------------------- #
-def test_eigenband_regulariser_matches_reference():
+def test_eigenband_regulariser_matches_reference(check):
+    """numpy and scipy only, on stored matrices; what moves between machines here
+    is LAPACK's rounding of a nearly degenerate spectrum (4.6e-4 relative on
+    a GitHub runner), amplified by the band inflation."""
     h = _load("halfset_reference.npz")
     for M, nb, seed in h["spd_cases"]:
         k = f"spd::{M}_{nb}_{seed}"
         R, info = hs.halfset_eigen_regularize(h[k + "::G1"], h[k + "::G2"], n_bands=int(nb))
-        close(R, h[k + "::G_reg"], rtol=1e-10, atol=1e-14)
-        close(info["band_ssnr"], h[k + "::band_ssnr"], rtol=1e-10, atol=0)
+        check("regulariser", R, h[k + "::G_reg"])
+        check("regulariser_ssnr", info["band_ssnr"], h[k + "::band_ssnr"])
         ev = np.linalg.eigvalsh(R)
         assert ev.min() >= -1e-10 * ev.max()
         assert np.all(info["lam_reg"] >= np.maximum(info["lam"], 0.0) - 1e-12 * ev.max())

@@ -58,10 +58,10 @@ published; their history is kept below and their code at tag `v0.6.0`.
 - Uniform sample weights are exactly `ones(N) / N` (a one-ulp renormalisation
   was amplified to `4e-4` in the half-set weights) and the `(M, M)` solve stays
   on scipy's Cholesky (the JAX one differs by `1e-4` at condition `1e12`).
-  Golden references under `tests/golden/` pin both: bit for bit where the
-  frozen slice basis reproduces bit for bit (JAX 0.5.3 on the machine that
-  froze them), and at the measured drift between JAX builds and machines
-  anywhere else (`docs/reproducibility.md`).
+  Golden references under `tests/golden/` pin both: bit for bit on the
+  machine that froze them with JAX 0.5.3 (`SLICED_COMMITTOR_GOLDEN_TIER=strict`,
+  the release gate), and at the measured drift between JAX builds and
+  machines by default (`docs/reproducibility.md`).
 
 ### Rates
 

@@ -37,15 +37,15 @@ JAX_PLATFORMS=cpu pytest sliced_committor/tests -q
 ```
 
 The golden gates (`test_golden.py`, `test_halfset.py`) check the weights
-against the frozen references under `tests/golden/`. Where the frozen slice
-basis reproduces bit for bit (JAX 0.5.3 on the machine that froze it; the
-test detects this) they hold to the bit for the half-set filter and to
-`1e-13` for the scalar ridge; anywhere else, CI included, they compare the
-committor values, the half-set weights and the scalar summaries at the
-measured drift between JAX builds and machines
-(`SLICED_COMMITTOR_GOLDEN_TIER=strict|drift` overrides the detection). A
-change that moves them in the frozen environment is a change of the
-published numbers and needs a reason in the changelog.
+against the frozen references under `tests/golden/` in two tiers. The
+release gate is the strict tier, `SLICED_COMMITTOR_GOLDEN_TIER=strict`,
+run on the machine that froze the references with JAX 0.5.3: bit for bit
+for the half-set filter, `1e-13` for the scalar ridge. It holds only there
+(XLA compiles for the host CPU and BLAS picks its kernels by CPU and matrix
+size), so by default, CI included, the drift tier compares the committor
+values, the half-set weights and the scalar summaries at the measured
+drift between JAX builds and machines. A change that moves the strict tier
+is a change of the published numbers and needs a reason in the changelog.
 `test_public_api.py` pins `__all__`; add a name there deliberately.
 `test_docs.py` executes every `python` code block of the README and the user
 docs in a namespace seeded with small synthetic inputs (`samples`, `in_A`,
