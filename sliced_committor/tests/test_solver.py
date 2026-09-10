@@ -110,8 +110,9 @@ def test_seed_reproducibility():
     np.testing.assert_array_equal(np.asarray(a.committors_1d), np.asarray(b.committors_1d))
 
 
-def test_direction_batching_is_exact():
-    """Batching the directions bounds memory and must not change a single bit."""
+def test_direction_batching_matches_to_rounding():
+    """Batching the directions bounds memory and changes nothing beyond the last
+    bits of XLA's reductions (identical on one XLA build, ``1e-14`` across)."""
     s, in_A, in_B = two_basin_samples(600, dim=3, seed=2)
     one = sc.compute_sliced_committor(s, in_A=in_A, in_B=in_B, n_directions=40, seed=5)
     batched = sc.compute_sliced_committor(
@@ -124,8 +125,11 @@ def test_direction_batching_is_exact():
         "log_dirichlet",
         "boundary_errors",
     ):
-        np.testing.assert_array_equal(
-            np.asarray(getattr(one, name)), np.asarray(getattr(batched, name))
+        np.testing.assert_allclose(
+            np.asarray(getattr(one, name)),
+            np.asarray(getattr(batched, name)),
+            rtol=1e-11,
+            atol=1e-11,
         )
 
 

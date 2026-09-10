@@ -37,10 +37,12 @@ JAX_PLATFORMS=cpu pytest sliced_committor/tests -q
 ```
 
 The golden gates (`test_golden.py`, `test_halfset.py`) check the weights
-against the frozen references under `tests/golden/`, to the bit for the
-half-set filter and to `1e-13` for the scalar ridge; a change that moves
-them is a change of the published numbers and needs a reason in the
-changelog.
+against the frozen references under `tests/golden/`: in the environment the
+references were produced in (JAX 0.5.3, the `numerics` CI job) to the bit
+for the half-set filter and to `1e-13` for the scalar ridge, and under any
+other JAX version at the measured cross-version drift. A change that moves
+them in the frozen environment is a change of the published numbers and
+needs a reason in the changelog.
 `test_public_api.py` pins `__all__`; add a name there deliberately.
 `test_docs.py` executes every `python` code block of the README and the user
 docs in a namespace seeded with small synthetic inputs (`samples`, `in_A`,

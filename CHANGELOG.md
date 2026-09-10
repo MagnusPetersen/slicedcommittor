@@ -57,7 +57,9 @@ published; their history is kept below and their code at tag `v0.6.0`.
 - Uniform sample weights are exactly `ones(N) / N` (a one-ulp renormalisation
   was amplified to `4e-4` in the half-set weights) and the `(M, M)` solve stays
   on scipy's Cholesky (the JAX one differs by `1e-4` at condition `1e12`).
-  Golden references under `tests/golden/` pin both.
+  Golden references under `tests/golden/` pin both, bit for bit in the
+  environment they were produced in (JAX 0.5.3) and at the measured
+  cross-version drift under any other (`docs/reproducibility.md`).
 
 ### Rates
 

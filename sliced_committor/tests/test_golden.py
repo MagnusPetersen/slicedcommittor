@@ -10,8 +10,22 @@ Three reference files, all produced ONCE at tag ``v0.6.0`` by
   prototype it was ported from, the Wolfe-Quapp sample generator, and a
   full Wolfe-Quapp fit (weights, committor on a grid, held-out cap).
 
-The half-set path is the paper's; it must stay bit-for-bit. The ``auto``
-ridge and the basis are allowed rounding drift across JAX/LAPACK versions.
+The references were produced with jax ``0.5.3`` (``FROZEN_JAX``). In that
+environment the half-set path, the paper's, is gated bit for bit, and the
+``auto`` ridge and the basis are allowed rounding drift. Under any other
+JAX/XLA the same gates run at the measured cross-version drift instead. Two
+mechanisms move the numbers between XLA versions, neither of them a bug: a
+sample whose projection coincides with a grid point of its slice (quantile
+bins are built from the sample values, so duplicated frames put bin centres
+exactly on samples) takes the slope of one adjacent bin or the other by the
+last bit of rounding, which moves a few Gram entries by order one; and the
+half-set filter reads a band correlation off a nearly degenerate spectrum,
+which turns ``1e-13`` in the Gram into ``1e-3`` in individual weights.
+Measured between 0.5.3 and 0.10.2: the slice basis moves by ``1e-13``,
+individual weights by up to ``1e-2`` relative, the committor by up to
+``1e-5`` (half-set) and ``1e-3`` (scalar ridge, on the 500-sample fixture),
+energies and caps by ``1e-4`` relative. CI runs the strict tier in the
+``numerics`` job and the drift tier in the version matrix.
 """
 
 import os
@@ -30,8 +44,38 @@ from sliced_committor.core import _halfset as hs
 from ._helpers import wolfe_quapp_samples
 
 GOLDEN = os.path.join(os.path.dirname(__file__), "golden")
+FROZEN_JAX = "0.5.3"
+SAME_ENV = jax.__version__ == FROZEN_JAX
+
 EXACT = dict(rtol=0.0, atol=0.0)
 ROUNDING = dict(rtol=1e-8, atol=1e-12)
+# tier: (frozen environment, any other JAX/XLA). The drift tolerances are the
+# measured 0.5.3 -> 0.6.2 and 0.5.3 -> 0.10.2 differences with a margin of ten
+# to a hundred (the noisy intermediates, band SSNR and per-fold caps, move
+# by a few percent on the 500-sample fixture under 0.6.2).
+_TIERS = {
+    "directions": (EXACT, dict(rtol=0.0, atol=1e-12)),
+    "basis": (ROUNDING, dict(rtol=1e-8, atol=1e-9)),
+    "moments": (EXACT, dict(rtol=1e-9, atol=1e-12)),
+    "weights_auto": (ROUNDING, dict(rtol=0.0, atol=5e-2)),
+    "weights_halfset": (EXACT, dict(rtol=0.0, atol=1e-4)),
+    "committor_auto": (ROUNDING, dict(rtol=0.0, atol=5e-3)),
+    "committor_halfset": (EXACT, dict(rtol=0.0, atol=1e-4)),
+    "scalar_auto": (ROUNDING, dict(rtol=1e-2, atol=1e-5)),
+    "scalar_halfset": (EXACT, dict(rtol=1e-2, atol=1e-5)),
+    "per_fold": (EXACT, dict(rtol=1e-1, atol=0.0)),
+    "fold_se": (ROUNDING, dict(rtol=1e-1, atol=1e-6)),
+    "gram_reg": (EXACT, dict(rtol=0.25, atol=0.0)),
+    "band_ssnr": (EXACT, dict(rtol=5e-2, atol=1e-2)),
+    "reference": (dict(rtol=1e-8, atol=0.0), dict(rtol=0.0, atol=1e-4)),
+    "reference_scalar": (dict(rtol=1e-8, atol=0.0), dict(rtol=1e-2, atol=0.0)),
+    "reference_ssnr": (dict(rtol=1e-10, atol=0.0), dict(rtol=5e-2, atol=1e-2)),
+}
+
+
+def tol(name):
+    """The tolerance of a golden comparison: strict in the frozen environment."""
+    return _TIERS[name][0 if SAME_ENV else 1]
 
 
 def _load(name):
@@ -54,48 +98,49 @@ def basis(golden_samples, golden_labels):
 # the slice basis
 # --------------------------------------------------------------------------- #
 def test_basis_matches_golden(basis, golden_data):
-    close(basis.directions, golden_data["directions"], **EXACT)
-    close(basis.slice_coords, golden_data["slice_coords"], **ROUNDING)
-    close(basis.free_energies, golden_data["log_density (= -β·F)"], **ROUNDING)
-    close(basis.committors_1d, golden_data["committors_1d"], **ROUNDING)
+    close(basis.directions, golden_data["directions"], **tol("directions"))
+    close(basis.slice_coords, golden_data["slice_coords"], **tol("basis"))
+    close(basis.free_energies, golden_data["log_density (= -β·F)"], **tol("basis"))
+    close(basis.committors_1d, golden_data["committors_1d"], **tol("basis"))
     assert bool(jnp.all(basis.valid_mask))
 
 
 # --------------------------------------------------------------------------- #
 # the weight solve
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("tikhonov,tol", [("auto", ROUNDING), ("halfset_eigen", EXACT)])
-def test_weights_match_golden(basis, golden_samples, golden_labels, tikhonov, tol):
+@pytest.mark.parametrize("tikhonov,rule", [("auto", "auto"), ("halfset_eigen", "halfset")])
+def test_weights_match_golden(basis, golden_samples, golden_labels, tikhonov, rule):
     e = _load("ebmc_golden.npz")
     k = f"ebmc_{tikhonov}"
     w = sc.solve_weights(basis, tikhonov=tikhonov)
-    close(w.w, e[f"{k}::w"], **tol)
-    close(w.c, e[f"{k}::c"], **tol)
-    close(w.moment_gap, e[f"{k}::M_gap"], **tol)
-    close(w.dirichlet_energy, e[f"{k}::energy"], **tol)
-    close(w.diagnostics["a"], e[f"{k}::a"], **EXACT)
-    close(w.diagnostics["b"], e[f"{k}::b"], **EXACT)
+    close(w.w, e[f"{k}::w"], **tol(f"weights_{rule}"))
+    close(w.c, e[f"{k}::c"], **tol(f"scalar_{rule}"))
+    close(w.moment_gap, e[f"{k}::M_gap"], **tol(f"scalar_{rule}"))
+    close(w.dirichlet_energy, e[f"{k}::energy"], **tol(f"scalar_{rule}"))
+    close(w.diagnostics["a"], e[f"{k}::a"], **tol("moments"))
+    close(w.diagnostics["b"], e[f"{k}::b"], **tol("moments"))
     q = sc.build_committor(basis, w)
     pts = jnp.asarray(e["eval_points"])
     in_A, in_B = golden_labels
-    close(q(pts), e[f"{k}::q_ref_eval_points_free"], **tol)
-    close(q(golden_samples, in_A=in_A, in_B=in_B), e[f"{k}::q_at_samples_snapped"], **tol)
+    close(q(pts), e[f"{k}::q_ref_eval_points_free"], **tol(f"committor_{rule}"))
+    snapped = q(golden_samples, in_A=in_A, in_B=in_B)
+    close(snapped, e[f"{k}::q_at_samples_snapped"], **tol(f"committor_{rule}"))
 
 
 def test_halfset_diagnostics_match_golden(basis):
     e = _load("ebmc_golden.npz")
     w = sc.solve_weights(basis, tikhonov="halfset_eigen")
     assert w.ridge == 0.0
-    close(w.diagnostics["G_reg"], e["ebmc_halfset_eigen::G_reg"], **EXACT)
-    close(w.diagnostics["band_ssnr"], e["ebmc_halfset_eigen::band_ssnr"], **EXACT)
+    close(w.diagnostics["G_reg"], e["ebmc_halfset_eigen::G_reg"], **tol("gram_reg"))
+    close(w.diagnostics["band_ssnr"], e["ebmc_halfset_eigen::band_ssnr"], **tol("band_ssnr"))
 
 
 def test_heldout_cap_matches_golden(basis):
     e = _load("ebmc_golden.npz")
     hc = sc.solve_weights(basis, tikhonov="halfset_eigen", heldout_cap=True).heldout_cap
-    close(hc["cap"], e["ebmc_halfset_eigen::heldout_cap"], **EXACT)
-    close(hc["per_fold"], e["ebmc_halfset_eigen::heldout_per_fold"], **EXACT)
-    close(hc["se"], e["ebmc_halfset_eigen::heldout_se"], **ROUNDING)
+    close(hc["cap"], e["ebmc_halfset_eigen::heldout_cap"], **tol("scalar_halfset"))
+    close(hc["per_fold"], e["ebmc_halfset_eigen::heldout_per_fold"], **tol("per_fold"))
+    close(hc["se"], e["ebmc_halfset_eigen::heldout_se"], **tol("fold_se"))
     assert np.isfinite(hc["gap"])
 
 
@@ -127,8 +172,9 @@ def test_wolfe_quapp_generator_matches_reference(n, seed):
 
 
 def test_wolfe_quapp_fit_matches_reference():
-    """The full one-liner at the paper's ridge, bit for bit, and against the
-    independent numpy reference path (``halfset_grams`` -> regularise -> solve)."""
+    """The full one-liner at the paper's ridge, bit for bit in the frozen
+    environment, and against the independent numpy reference path
+    (``halfset_grams`` -> regularise -> solve)."""
     h = _load("halfset_reference.npz")
     X, in_A, in_B = wolfe_quapp_samples(4000, 0)
     q, fit = sc.fit_committor(
@@ -143,15 +189,15 @@ def test_wolfe_quapp_fit_matches_reference():
         tikhonov="halfset_eigen",
         return_details=True,
     )
-    close(fit.result.committors_1d, h["wq_fit::committors_1d"], **ROUNDING)
-    close(fit.weights.w, h["wq_fit::w_lib"], **EXACT)
-    close(fit.weights.w, h["wq_fit::w_ref"], rtol=1e-8, atol=0)
-    close(fit.weights.moment_gap, h["wq_fit::M_gap_ref"], rtol=1e-8, atol=0)
-    close(fit.weights.c, h["wq_fit::c_lib"], **EXACT)
-    close(fit.weights.dirichlet_energy, h["wq_fit::energy_lib"], **EXACT)
-    close(fit.weights.diagnostics["G_reg"], h["wq_fit::G_reg_lib"], **EXACT)
-    close(fit.weights.diagnostics["band_ssnr"], h["wq_fit::band_ssnr_ref"], rtol=1e-10, atol=0)
-    close(q(jnp.asarray(h["wq_fit::grid"])), h["wq_fit::q_grid_lib"], **EXACT)
+    close(fit.result.committors_1d, h["wq_fit::committors_1d"], **tol("basis"))
+    close(fit.weights.w, h["wq_fit::w_lib"], **tol("weights_halfset"))
+    close(fit.weights.w, h["wq_fit::w_ref"], **tol("reference"))
+    close(fit.weights.moment_gap, h["wq_fit::M_gap_ref"], **tol("reference_scalar"))
+    close(fit.weights.c, h["wq_fit::c_lib"], **tol("scalar_halfset"))
+    close(fit.weights.dirichlet_energy, h["wq_fit::energy_lib"], **tol("scalar_halfset"))
+    close(fit.weights.diagnostics["G_reg"], h["wq_fit::G_reg_lib"], **tol("gram_reg"))
+    close(fit.weights.diagnostics["band_ssnr"], h["wq_fit::band_ssnr_ref"], **tol("reference_ssnr"))
+    close(q(jnp.asarray(h["wq_fit::grid"])), h["wq_fit::q_grid_lib"], **tol("committor_halfset"))
 
 
 def test_wolfe_quapp_heldout_cap_matches_reference():
@@ -168,6 +214,6 @@ def test_wolfe_quapp_heldout_cap_matches_reference():
         binning_method="equal_width",
     )
     w = sc.solve_weights(res, tikhonov="halfset_eigen", heldout_cap=True)
-    close(w.w, h["wq_cap::w"], **EXACT)
-    close(w.heldout_cap["cap"], h["wq_cap::cap"], **EXACT)
-    close(w.heldout_cap["per_fold"], h["wq_cap::per_fold"], **EXACT)
+    close(w.w, h["wq_cap::w"], **tol("weights_halfset"))
+    close(w.heldout_cap["cap"], h["wq_cap::cap"], **tol("scalar_halfset"))
+    close(w.heldout_cap["per_fold"], h["wq_cap::per_fold"], **tol("per_fold"))

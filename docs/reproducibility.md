@@ -4,9 +4,21 @@
 
 | held fixed | same result |
 |---|---|
-| `seed`, JAX minor version, accelerator | bit-exact on the golden fixtures; a large `(M, M)` solve can differ between processes by about `1e-13` relative from the BLAS reduction order, with `G`, `a` and `b` identical |
-| `seed`, different JAX minor versions, CPU | committors and weights to about `1e-12` relative; XLA fusion moves the 1D solves by about `1e-13` |
-| `seed`, GPU versus CPU | about `1e-9` to `1e-7` relative in float64, from non-associative reductions |
+| `seed`, JAX version, device | bit-exact on the golden fixtures; a large `(M, M)` solve can differ between processes by about `1e-13` relative from the BLAS reduction order, with `G`, `a` and `b` identical |
+| `seed`, different JAX versions, CPU | the slice basis to `1e-13`; the committor to about `1e-5` with the half-set filter (`1e-3` with the scalar ridge on a small fixture with duplicated frames); individual weights to about `1e-2` relative; energies and held-out caps to `1e-4` relative |
+| `seed`, GPU versus CPU | about `1e-9` to `1e-7` relative in float64 on the slice basis, from non-associative reductions, amplified into the weights as in the row above |
+
+Two mechanisms carry rounding into the weights, and neither is a bug. A
+sample whose projection coincides with a grid point of its slice takes the
+slope of one adjacent bin or the other, decided by the last bit of the
+projection; quantile bins are built from the sample values, so duplicated
+frames (a Monte Carlo rejection, a repeated snapshot) put bin centres
+exactly on samples, and a change of XLA version flips a handful of them,
+which moves a few Gram entries by order one. And the half-set filter reads
+a band correlation off a nearly degenerate spectrum, so `1e-13` in the Gram
+matrix becomes `1e-3` in individual weights while the committor itself
+moves far less. The numbers in the table are measured between JAX 0.5.3
+and 0.10.2 on the golden fixtures.
 
 Two facts about the numerics are load-bearing and pinned by the golden
 tests under `sliced_committor/tests/golden/`:
@@ -30,15 +42,19 @@ regularisation and therefore the weights.
 basis, the weights under both ridge rules, the half-set regularised Gram
 matrices and the held-out cap on a two-basin fixture and on the paper's
 Wolfe-Quapp benchmark. The script that produced them,
-`freeze_1_0_references.py`, sits beside them as their provenance. The
-half-set weights reproduce them to the bit; the scalar-ridge weights to
-`1e-13`.
+`freeze_1_0_references.py`, sits beside them as their provenance, and they
+were produced with JAX 0.5.3. In that environment the half-set weights
+reproduce them to the bit and the scalar-ridge weights to `1e-13`; under
+any other JAX version the same tests run at the measured cross-version
+drift of the table above, with a margin, so a real change of the numerics
+still fails. CI runs both: a job pinned to the frozen JAX and a version
+matrix on the current one.
 
 ## The paper
 
 The paper's figures and rate table are reproduced by the Zenodo record's
-self-contained package, which vendors this library and checks every number
-against its reference outputs (`2e-3` relative on the scalars, `5e-3`
+self-contained package, which vendors this library, pins its environment
+(JAX 0.6.2) and checks every number against its reference outputs (`2e-3` relative on the scalars, `5e-3`
 absolute on the arrays, and the headline RMSE values to the last digit the
 paper prints). Pin the
 library version in a downstream regression suite:

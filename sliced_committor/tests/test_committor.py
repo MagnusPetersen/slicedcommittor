@@ -54,12 +54,13 @@ def test_single_point_returns_scalar(fit):
 
 
 def test_committor_is_a_pure_function_of_the_point(fit):
-    """The value at a point does not depend on what else is in the batch."""
+    """The value at a point does not depend on what else is in the batch, beyond
+    the last bit of XLA's batched reductions (one ulp between batch shapes)."""
     s, _, _, q, _ = fit
     batch = np.asarray(q(s[:9]))
     for i in (0, 4, 8):
-        assert float(q(s[i])) == batch[i]
-    np.testing.assert_array_equal(np.asarray(q(s[3:6])), batch[3:6])
+        assert abs(float(q(s[i])) - batch[i]) <= 4e-16
+    np.testing.assert_allclose(np.asarray(q(s[3:6])), batch[3:6], rtol=0, atol=4e-16)
 
 
 def test_boundary_snapping_via_masks(fit):

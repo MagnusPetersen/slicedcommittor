@@ -41,6 +41,24 @@ jobs:
           name: coverage-xml
           path: coverage.xml
 
+  numerics:
+    # The golden gates are bit-exact only in the environment the references
+    # were frozen in (jax 0.5.3); the version matrix above runs them at the
+    # measured cross-version drift (sliced_committor/tests/test_golden.py).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install with the frozen JAX
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test] "jax==0.5.3" "jaxlib==0.5.3"
+      - name: Run the suite with the golden gates bit for bit
+        run: pytest sliced_committor/tests -v
+
   umbrella:
     runs-on: ubuntu-latest
     steps:
