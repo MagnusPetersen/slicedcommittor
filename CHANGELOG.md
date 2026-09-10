@@ -53,13 +53,15 @@ published; their history is kept below and their code at tag `v0.6.0`.
   reproduced outside the solve.
 - The feature-space metric `sincos_pullback_metric` and `AngleSign` are
   exported; `AngleSign` is required.
-- `scipy>=1.10` is a hard dependency (the half-set path used it undeclared).
+- `scipy>=1.10` is a hard dependency (the half-set path used it undeclared);
+  `jax>=0.5.3` is the oldest version tested, and CI runs it.
 - Uniform sample weights are exactly `ones(N) / N` (a one-ulp renormalisation
   was amplified to `4e-4` in the half-set weights) and the `(M, M)` solve stays
   on scipy's Cholesky (the JAX one differs by `1e-4` at condition `1e12`).
-  Golden references under `tests/golden/` pin both, bit for bit in the
-  environment they were produced in (JAX 0.5.3) and at the measured
-  cross-version drift under any other (`docs/reproducibility.md`).
+  Golden references under `tests/golden/` pin both: bit for bit where the
+  frozen slice basis reproduces bit for bit (JAX 0.5.3 on the machine that
+  froze them), and at the measured drift between JAX builds and machines
+  anywhere else (`docs/reproducibility.md`).
 
 ### Rates
 

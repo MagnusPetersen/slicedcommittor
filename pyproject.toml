@@ -36,7 +36,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Typing :: Typed",
 ]
-dependencies = ["jax>=0.4.20", "numpy>=1.24", "scipy>=1.10"]
+dependencies = ["jax>=0.5.3", "numpy>=1.24", "scipy>=1.10"]
 
 [project.urls]
 Homepage = "https://github.com/MagnusPetersen/slicedcommittor"

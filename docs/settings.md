@@ -217,8 +217,8 @@ evaluation costs no more memory than the fit. The same code runs on a GPU;
 ## Determinism
 
 `seed` fixes the direction draw, and nothing else is random: the same
-samples, labels and settings reproduce the committor to the bit in one
-environment. Across JAX versions and devices the committor moves by about
-`1e-5` and individual weights by up to `1e-2` relative, from rounding that
-the Gram solve amplifies; [reproducibility](reproducibility.md) has the
-contract and the mechanism.
+samples, labels and settings reproduce the committor to the bit on one
+machine with one JAX build. Across JAX builds, machines and devices the
+committor moves by about `1e-5` and individual weights by up to `1e-2`
+relative, from rounding that the Gram solve amplifies;
+[reproducibility](reproducibility.md) has the contract and the mechanism.

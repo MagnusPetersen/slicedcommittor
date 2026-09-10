@@ -4,8 +4,8 @@
 
 | held fixed | same result |
 |---|---|
-| `seed`, JAX version, device | bit-exact on the golden fixtures; a large `(M, M)` solve can differ between processes by about `1e-13` relative from the BLAS reduction order, with `G`, `a` and `b` identical |
-| `seed`, different JAX versions, CPU | the slice basis to `1e-13`; the committor to about `1e-5` with the half-set filter (`1e-3` with the scalar ridge on a small fixture with duplicated frames); individual weights to about `1e-2` relative; energies and held-out caps to `1e-4` relative |
+| `seed`, one JAX build, one machine | bit-exact on the golden fixtures; a large `(M, M)` solve can differ between processes by about `1e-13` relative from the BLAS reduction order, with `G`, `a` and `b` identical |
+| `seed`, another JAX build or another machine, CPU | the slice basis to `1e-13`; the committor to about `1e-5` with the half-set filter (`1e-3` with the scalar ridge on a small fixture with duplicated frames); individual weights to about `1e-2` relative; energies and held-out caps to `1e-4` relative; the band signal-to-noise ratios and the per-fold caps by a few percent |
 | `seed`, GPU versus CPU | about `1e-9` to `1e-7` relative in float64 on the slice basis, from non-associative reductions, amplified into the weights as in the row above |
 
 Two mechanisms carry rounding into the weights, and neither is a bug. A
@@ -17,8 +17,10 @@ exactly on samples, and a change of XLA version flips a handful of them,
 which moves a few Gram entries by order one. And the half-set filter reads
 a band correlation off a nearly degenerate spectrum, so `1e-13` in the Gram
 matrix becomes `1e-3` in individual weights while the committor itself
-moves far less. The numbers in the table are measured between JAX 0.5.3
-and 0.10.2 on the golden fixtures.
+moves far less. XLA compiles for the host CPU and the BLAS kernels are
+chosen by it, so another machine rounds the last bit differently even with
+the same versions, and the same mechanisms apply. The numbers in the table
+are measured between JAX 0.5.3, 0.6.2 and 0.10.2 on the golden fixtures.
 
 Two facts about the numerics are load-bearing and pinned by the golden
 tests under `sliced_committor/tests/golden/`:
@@ -43,12 +45,16 @@ basis, the weights under both ridge rules, the half-set regularised Gram
 matrices and the held-out cap on a two-basin fixture and on the paper's
 Wolfe-Quapp benchmark. The script that produced them,
 `freeze_1_0_references.py`, sits beside them as their provenance, and they
-were produced with JAX 0.5.3. In that environment the half-set weights
-reproduce them to the bit and the scalar-ridge weights to `1e-13`; under
-any other JAX version the same tests run at the measured cross-version
-drift of the table above, with a margin, so a real change of the numerics
-still fails. CI runs both: a job pinned to the frozen JAX and a version
-matrix on the current one.
+were produced with JAX 0.5.3. The tests first check whether the running
+environment reproduces the frozen slice basis bit for bit (the same JAX on
+a machine that rounds like the one that froze it) and then hold the
+half-set weights to the bit and the scalar-ridge weights to `1e-13`;
+anywhere else they compare the committor values, the half-set weights and
+the scalar summaries at the measured drift of the table above, with a
+margin, so a real change of the numerics still fails, and leave the
+ill-conditioned intermediates alone. `SLICED_COMMITTOR_GOLDEN_TIER` set to
+`strict` or `drift` overrides the detection. CI runs the drift tier on the
+newest JAX and on the oldest supported one.
 
 ## The paper
 
