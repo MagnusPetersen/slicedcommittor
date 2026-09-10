@@ -52,14 +52,14 @@ def test_mixture_is_stratified_and_concentrated(clusters):
     X, in_A, in_B = clusters
     axis, _ = sc.compute_lda_axis(X, in_A, in_B)
     key = jax.random.PRNGKey(2)
-    dirs = sc.sample_power_spherical_mixture(key, axis[None, :], 400, 12, mu=0.6, alpha=0.5)
+    dirs = sc.sample_power_spherical_mixture(key, axis, 400, 12, mu=0.6, alpha=0.5)
     assert dirs.shape == (400, 12) and _unit(dirs)
     cos = np.asarray(dirs @ axis)
     # first 200 rows uniform (mean cosine ~ 0), last 200 concentrated (mean cosine ~ mu)
     assert abs(cos[:200].mean()) < 0.15
     assert abs(cos[200:].mean() - 0.6) < 0.1
     # alpha = 1 is pure uniform, whatever the axis
-    unif = sc.sample_power_spherical_mixture(key, axis[None, :], 64, 12, mu=0.6, alpha=1.0)
+    unif = sc.sample_power_spherical_mixture(key, axis, 64, 12, mu=0.6, alpha=1.0)
     np.testing.assert_array_equal(np.asarray(unif), np.asarray(sc.directions_uniform(key, 64, 12)))
 
 
@@ -68,11 +68,11 @@ def test_mixture_validates_its_arguments(clusters):
     axis, _ = sc.compute_lda_axis(X, in_A, in_B)
     key = jax.random.PRNGKey(0)
     with pytest.raises(ValueError, match="mu"):
-        sc.sample_power_spherical_mixture(key, axis[None, :], 8, 12, mu=1.0)
+        sc.sample_power_spherical_mixture(key, axis, 8, 12, mu=1.0)
     with pytest.raises(ValueError, match="alpha"):
-        sc.sample_power_spherical_mixture(key, axis[None, :], 8, 12, alpha=1.5)
-    with pytest.raises(ValueError, match="bias_axes"):
-        sc.sample_power_spherical_mixture(key, axis[None, :3], 8, 12, alpha=0.5)
+        sc.sample_power_spherical_mixture(key, axis, 8, 12, alpha=1.5)
+    with pytest.raises(ValueError, match="axis"):
+        sc.sample_power_spherical_mixture(key, axis[:3], 8, 12, alpha=0.5)
 
 
 @pytest.mark.parametrize("mode", ["uniform", "lda"])

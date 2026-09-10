@@ -8,6 +8,8 @@ jax.config.update("jax_enable_x64", True)
 
 from sliced_committor.core import _halfset as hs
 
+from ._helpers import spd_pair as _spd_pair
+
 
 def test_folds_are_contiguous_blocks_within_each_stratum():
     N = 100
@@ -42,14 +44,6 @@ def test_halfset_grams_deal_folds_alternately():
     np.testing.assert_allclose(G2, np.eye(3) * (w[odd] @ (np.array(odd) + 1)) / w[odd].sum())
     with pytest.raises(ValueError, match="two folds"):
         hs.halfset_grams(G_folds[:1], w[:1])
-
-
-def _spd_pair(M, seed):
-    rng = np.random.default_rng(seed)
-    B = rng.standard_normal((M, M))
-    base = B @ B.T / M
-    E1, E2 = rng.standard_normal((M, M)), rng.standard_normal((M, M))
-    return base + 0.05 * (E1 @ E1.T) / M, base + 0.05 * (E2 @ E2.T) / M
 
 
 def test_identical_halves_recover_the_mean():

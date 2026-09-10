@@ -28,16 +28,19 @@ The solve needs float64 (``jax_enable_x64``): ``cond(G)`` reaches 1e12. The
 """
 
 import logging
-from itertools import pairwise
+from functools import partial
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import jit, lax
 
+from .._runs import segments
 from . import _halfset as hs
-from ._moments import compute_basin_moments
+from ._moments import BATCH, basin_moments, slice_values
 from .gram import _assemble_gram_matrix, _compute_derivative_matrix, cos_matrix_from_metric
+from .solver import _basis_1d, _combine, _slice_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +101,33 @@ def _require_x64():
         )
 
 
+def _rule(tikhonov):
+    """Validate ``tikhonov``: a rule name, or a non-negative absolute ridge."""
+    if isinstance(tikhonov, str):
+        if tikhonov not in TIKHONOV_RULES:
+            raise ValueError(
+                f"tikhonov must be one of {TIKHONOV_RULES} or a float (absolute ridge); got {tikhonov!r}"
+            )
+        return tikhonov
+    rule = float(tikhonov)
+    if not rule >= 0.0:
+        raise ValueError(f"an absolute ridge must be >= 0; got {tikhonov!r}")
+    return rule
+
+
 def _effective_n(W):
     """``N_eff = (sum W)^2 / sum W^2``."""
     W = jnp.asarray(W)
     Z, Z2 = jnp.sum(W), jnp.sum(W**2)
     return float(Z**2 / Z2) if float(Z2) > 0 else float(W.shape[0])
+
+
+def _auto_ridge(G, valid_mask, n_eff):
+    """``max(1e-12, 1/sqrt(N_eff)) median(diag G)`` over the valid directions."""
+    diag = np.asarray(jnp.diag(G))[np.asarray(valid_mask)]
+    med = float(np.median(diag)) if diag.size else 1.0
+    med = med if np.isfinite(med) and med > 0 else 1.0
+    return max(1e-12, 1.0 / n_eff**0.5) * med
 
 
 def _ridged_gram(G, valid_mask, ridge):
@@ -143,7 +168,6 @@ def _solve(G_reg, a, b, valid_mask):
         Ginv_b = np.linalg.lstsq(G_v, bv, rcond=None)[0]
     A_s = float(av @ Ginv_a)
     B_s = float(bv @ Ginv_b)
-    C_s = float(av @ Ginv_b)
     R = float(delta @ w_dual)
     w_v = w_dual / R if abs(R) > 1e-300 else w_dual
     w = np.zeros(valid.size)
@@ -154,7 +178,6 @@ def _solve(G_reg, a, b, valid_mask):
         R=R,
         A=A_s,
         B=B_s,
-        C=C_s,
         cond=R / max(A_s, B_s, 1e-30),
         cond_chol=cond_chol,
     )
@@ -172,24 +195,45 @@ def _gate(out, raise_on_degenerate):
     return cond
 
 
-def _assemble(result, W):
-    """The derivative matrix ``F``, the cosine matrix and the Gram ``G = cos * (F sqrt W)(F sqrt W)^T``."""
-    F = _compute_derivative_matrix(
-        result.slice_coords, result.committors_1d, result.projected_samples
-    )
-    cos_matrix = cos_matrix_from_metric(result.directions, result.feature_metric)
-    F = F.astype(jnp.float64)
-    W = jnp.asarray(W, dtype=jnp.float64)
-    G = _assemble_gram_matrix(F, W, cos_matrix)
-    return F, W, cos_matrix, G
+class _Basis(NamedTuple):
+    """What a solve needs that does not depend on the frame multiplicities: the
+    slice slopes ``F[j, n] = q_j'(theta_j . x_n)`` and the cosine matrix."""
+
+    F: jnp.ndarray
+    cos_matrix: jnp.ndarray
+
+
+@partial(jit, static_argnames=("size",))
+def _slopes(slice_coords, committors_1d, projected_samples, start, size):
+    """The slopes of directions ``start:start + size``; the projections are sliced inside the jit."""
+    ps = lax.dynamic_slice_in_dim(projected_samples, start, size, axis=0)
+    return _compute_derivative_matrix(slice_coords, committors_1d, ps)
+
+
+def _basis(result, batch_size: int = BATCH):
+    """The slopes assembled in direction batches (the bin search of a block is
+    the transient, not that of all ``M`` directions) and the cosine matrix."""
+    M = result.projected_samples.shape[0]
+    blocks = [
+        _slopes(
+            result.slice_coords[start : start + min(batch_size, M - start)],
+            result.committors_1d[start : start + min(batch_size, M - start)],
+            result.projected_samples,
+            start,
+            min(batch_size, M - start),
+        )
+        for start in range(0, M, batch_size)
+    ]
+    F = blocks[0] if len(blocks) == 1 else jnp.concatenate(blocks)
+    return _Basis(F, cos_matrix_from_metric(result.directions, result.feature_metric))
 
 
 def _sample_weights(result, counts=None):
     """The sample weights the Gram averages over: uniform ``1/N`` or the stored
-    ``sample_weights`` verbatim (they should sum to 1; the weights ``w`` are
-    invariant to their scale, only the reported energy is not). A bootstrap
-    replicate multiplies in its frame multiplicities and is rescaled back to
-    the original total so its energy stays comparable."""
+    ``sample_weights`` verbatim (they sum to 1; the weights ``w`` are invariant
+    to their scale, only the reported energy is not). A bootstrap replicate
+    multiplies in its frame multiplicities and is rescaled back to the
+    original total so its energy stays comparable."""
     N = result.projected_samples.shape[1]
     W = (
         jnp.ones(N) / N
@@ -228,29 +272,29 @@ def solve_weights(
         :class:`Weights`.
     """
     _require_x64()
-    if isinstance(tikhonov, str):
-        if tikhonov not in TIKHONOV_RULES:
-            raise ValueError(
-                f"tikhonov must be one of {TIKHONOV_RULES} or a float (absolute ridge); got {tikhonov!r}"
-            )
-        rule = tikhonov
-    else:
-        rule = float(tikhonov)
-        if not rule >= 0.0:
-            raise ValueError(f"an absolute ridge must be >= 0; got {tikhonov!r}")
-    if heldout_cap and rule != "halfset_eigen":
+    if heldout_cap and tikhonov != "halfset_eigen":
         raise ValueError(
             "heldout_cap=True needs tikhonov='halfset_eigen': the cap is read through the half-set solve."
         )
-    if result.projected_samples is None:
-        raise ValueError("solve_weights needs result.projected_samples.")
+    return _solve_prepared(
+        result,
+        _basis(result),
+        slice_values(result),
+        tikhonov=tikhonov,
+        heldout_cap=heldout_cap,
+        raise_on_degenerate=raise_on_degenerate,
+        counts=counts,
+    )
 
+
+def _solve_prepared(result, basis, chunks, *, tikhonov, heldout_cap, raise_on_degenerate, counts):
+    """The solve on a prepared basis; ``chunks`` streams the slice committors at the samples."""
+    rule = _rule(tikhonov)
     valid_mask = jnp.asarray(result.valid_mask, bool)
     n_valid = int(np.asarray(valid_mask).sum())
     W = _sample_weights(result, counts)
-    F, W, cos_matrix, G = _assemble(result, W)
-    a, b = compute_basin_moments(result, counts=counts)
-    diagnostics = {"a": a, "b": b, "N_eff": _effective_n(W)}
+    G = _assemble_gram_matrix(basis.F, W, basis.cos_matrix)
+    diagnostics = {"N_eff": _effective_n(W)}
     cap_info = None
 
     if rule == "halfset_eigen" and n_valid < 2:
@@ -261,18 +305,21 @@ def solve_weights(
         rule = "auto"
         heldout_cap = False
 
+    fold_of = None
     if rule == "halfset_eigen":
         strata = hs.basin_strata(result.in_A, result.in_B)
         fold_of = hs.make_folds(int(W.shape[0]), hs.N_FOLDS, strata=strata)
-        G_folds, w_folds = hs.fold_gram_blocks(F, W, cos_matrix, fold_of, hs.N_FOLDS)
-        del F
+    moments = basin_moments(result, chunks, counts=counts, fold_of=fold_of if heldout_cap else None)
+    a, b = moments.a, moments.b
+    diagnostics.update(a=a, b=b)
+
+    if rule == "halfset_eigen":
+        G_folds, w_folds = hs.fold_gram_blocks(basis.F, W, basis.cos_matrix, fold_of, hs.N_FOLDS)
         if heldout_cap:
-            a_folds, b_folds, wA, wB = hs.fold_basin_moments(result, fold_of, hs.N_FOLDS)
-            cap_info = _heldout_cap(G_folds, w_folds, a_folds, b_folds, wA, wB, valid_mask)
+            cap_info = _heldout_cap(G_folds, w_folds, moments.folds, valid_mask)
         G1, G2 = hs.halfset_grams(G_folds, w_folds)
         del G_folds
         G_reg, info = hs.regularized_gram(G1, G2, valid_mask)
-        out = _solve(G_reg, a, b, valid_mask)
         ridge = 0.0
         diagnostics.update(
             G_reg=jnp.asarray(G_reg),
@@ -283,16 +330,9 @@ def solve_weights(
             n_bands=hs.N_BANDS,
         )
     else:
-        del F
-        if rule == "auto":
-            diag = np.asarray(jnp.diag(G))[np.asarray(valid_mask)]
-            med = float(np.median(diag)) if diag.size else 1.0
-            med = med if np.isfinite(med) and med > 0 else 1.0
-            ridge = max(1e-12, 1.0 / diagnostics["N_eff"] ** 0.5) * med
-        else:
-            ridge = rule
+        ridge = _auto_ridge(G, valid_mask, diagnostics["N_eff"]) if rule == "auto" else rule
         G_reg = _ridged_gram(G, valid_mask, ridge)
-        out = _solve(G_reg, a, b, valid_mask)
+    out = _solve(G_reg, a, b, valid_mask)
     cond = _gate(out, raise_on_degenerate)
 
     w = out["w"]
@@ -307,12 +347,10 @@ def solve_weights(
     diagnostics.update(
         A=float(out["A"]),
         B=float(out["B"]),
-        C=float(out["C"]),
         cond_chol=float(out["cond_chol"]),
         mu_A_check=float(a_np @ w_np + c),
         mu_B_check=float(b_np @ w_np + c),
         constraint_residual=float(abs((b_np - a_np) @ w_np - 1.0)),
-        sum_w=float(w_np.sum()),
         n_negative_weights=int(((w_np < 0) & valid_np).sum()),
         off_diagonal_magnitude=float(np.abs(G_np / denom)[offdiag].mean())
         if offdiag.any()
@@ -331,7 +369,7 @@ def solve_weights(
     )
 
 
-def _heldout_cap(G_folds, w_folds, a_folds, b_folds, wA, wB, valid_mask):
+def _heldout_cap(G_folds, w_folds, folds, valid_mask):
     """The Dirichlet cap read out of sample through the half-set solve.
 
     For each fold ``k`` the other folds are the training set: their even and
@@ -343,25 +381,13 @@ def _heldout_cap(G_folds, w_folds, a_folds, b_folds, wA, wB, valid_mask):
     """
     G_folds = np.asarray(G_folds, np.float64)
     w_folds = np.asarray(w_folds, np.float64)
-    a_folds = np.asarray(a_folds, np.float64)
-    b_folds = np.asarray(b_folds, np.float64)
-    wA = np.asarray(wA, np.float64)
-    wB = np.asarray(wB, np.float64)
+    a_folds, b_folds, wA, wB = folds
     K = G_folds.shape[0]
     caps = np.full(K, np.nan)
     caps_train = np.full(K, np.nan)
     for k in range(K):
-        other = np.array([j for j in range(K) if j != k])
-        if (
-            wA[k] <= 0
-            or wB[k] <= 0
-            or wA[other].sum() <= 0
-            or wB[other].sum() <= 0
-            or other.size < 2
-        ):
-            continue
-        wo = w_folds[other]
-        Gtr = np.tensordot(wo, G_folds[other], axes=(0, 0)) / max(wo.sum(), 1e-300)
+        other = np.delete(np.arange(K), k)
+        Gtr = hs.pool_folds(G_folds, w_folds, other)
         atr = (wA[other] @ a_folds[other]) / max(wA[other].sum(), 1e-300)
         btr = (wB[other] @ b_folds[other]) / max(wB[other].sum(), 1e-300)
         G1, G2 = hs.halfset_grams(G_folds, w_folds, folds=other)
@@ -421,44 +447,57 @@ def bootstrap_weights(
     Contiguous blocks of ``block_len`` frames are resampled with replacement
     (never across ``run_ids`` boundaries, so independent trajectories are never
     spliced), the resampled frame multiplicities reweight the Gram and the
-    basin moments, and :func:`solve_weights` is re-run with the same
-    ``tikhonov`` rule the fit used. ``points`` (optional, ``(P, dim)``) adds the
-    replicate committor values there.
+    basin moments, and the solve is re-run with the same ``tikhonov`` rule the
+    fit used. Everything that does not depend on the multiplicities is built
+    once, so the replicates cost one Gram assembly and one small solve each:
+    the slice slopes and the slice committors at the samples stay resident
+    (two ``(M, N)`` float64 arrays), and with ``points`` (optional, ``(P,
+    dim)``) the ``(M, P)`` slice committors there, from which each replicate's
+    committor values are read.
     """
-    from .committor import build_committor
-
+    _require_x64()
+    _rule(weights.tikhonov)  # an invalid rule must raise here, not vanish into the replicate loop
     rng = np.random.default_rng(seed)
     N = int(result.projected_samples.shape[1])
-    runs = np.zeros(N, np.int64) if run_ids is None else np.asarray(run_ids)
-    starts = np.concatenate(
-        [np.arange(lo, hi, block_len) for lo, hi in _run_segments(runs)]
-        if N
-        else [np.zeros(0, np.int64)]
-    )
-    ends = np.minimum(
-        starts + block_len,
-        np.concatenate(
-            [
-                np.repeat(hi, ((hi - lo) + block_len - 1) // block_len)
-                for lo, hi in _run_segments(runs)
-            ]
-        ),
-    )
+    runs = np.zeros(N, np.int64) if run_ids is None else np.asarray(run_ids).reshape(-1)
+    if runs.shape[0] != N:
+        raise ValueError(f"run_ids length {runs.shape[0]} != number of frames {N}")
+    blocks = [
+        (start, min(start + block_len, hi))
+        for lo, hi in segments(runs)
+        for start in range(lo, hi, block_len)
+    ]
     in_A = np.asarray(result.in_A, bool)
     in_B = np.asarray(result.in_B, bool)
+
+    basis = _basis(result)
+    chunks = tuple(slice_values(result))
+    q_pts = None
+    if points is not None:
+        pts = jnp.asarray(points)
+        shape = pts.shape[:-1]
+        eval_basis = _basis_1d(result)
+        q_pts = _slice_matrix(eval_basis, pts.reshape(-1, pts.shape[-1]))
+
     ws, cs, gaps, energies, qs = [], [], [], [], []
     for _ in range(n_boot):
-        pick = rng.choice(starts.size, size=starts.size, replace=True)
+        pick = rng.choice(len(blocks), size=len(blocks), replace=True)
         counts = np.zeros(N, np.float64)
         for p in pick:
-            counts[starts[p] : ends[p]] += 1.0
+            counts[blocks[p][0] : blocks[p][1]] += 1.0
         if (counts[in_A] > 0).sum() < min_basin_frames or (
             counts[in_B] > 0
         ).sum() < min_basin_frames:
             continue
         try:
-            rep = solve_weights(
-                result, tikhonov=weights.tikhonov, raise_on_degenerate=False, counts=counts
+            rep = _solve_prepared(
+                result,
+                basis,
+                chunks,
+                tikhonov=weights.tikhonov,
+                heldout_cap=False,
+                raise_on_degenerate=False,
+                counts=counts,
             )
         except (ValueError, np.linalg.LinAlgError):
             continue
@@ -466,8 +505,9 @@ def bootstrap_weights(
         cs.append(rep.c)
         gaps.append(rep.moment_gap)
         energies.append(rep.dirichlet_energy)
-        if points is not None:
-            qs.append(np.asarray(build_committor(result, rep)(jnp.asarray(points)), np.float64))
+        if q_pts is not None:
+            q = jnp.clip(_combine(q_pts, rep.w, rep.c, eval_basis.valid_mask, shape), 0.0, 1.0)
+            qs.append(np.asarray(q, np.float64))
     return Bootstrap(
         w=np.asarray(ws),
         c=np.asarray(cs),
@@ -476,13 +516,3 @@ def bootstrap_weights(
         q=np.asarray(qs) if points is not None else None,
         n_ok=len(ws),
     )
-
-
-def _run_segments(runs):
-    """``(lo, hi)`` index ranges of the contiguous runs in ``run_ids``."""
-    runs = np.asarray(runs)
-    if runs.size == 0:
-        return []
-    change = np.flatnonzero(runs[1:] != runs[:-1]) + 1
-    bounds = np.concatenate([[0], change, [runs.size]])
-    return list(pairwise(bounds))

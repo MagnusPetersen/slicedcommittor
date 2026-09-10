@@ -17,12 +17,12 @@ import pytest
 from sliced_committor.umbrella import (
     USDataset,
     fit_and_rate,
-    pmf_kramers_rate,
+    kramers_baseline,
     progress_coordinate,
     reweight,
 )
 
-from ._helpers import umbrella_double_well
+from ._helpers import umbrella_double_well_dataset
 
 D0 = 0.05
 DT = 0.01
@@ -46,20 +46,7 @@ def _exact_rates(D0, a):
 
 @pytest.fixture(scope="module")
 def dataset():
-    x, y, wid, centers, kappa = umbrella_double_well(n_windows=8, dt=DT, D0=D0, seed=0)
-    return USDataset(
-        features=np.stack([x, y], axis=1),
-        cvs=x[:, None],
-        window_ids=wid,
-        window_centers=centers[:, None],
-        window_kappa=np.full((centers.size, 1), kappa),
-        beta=1.0,
-        dt=DT,
-        in_A=x < -A,
-        in_B=x > A,
-        cv_periodic=(None,),
-        meta={},
-    )
+    return umbrella_double_well_dataset(n_windows=8, dt=DT, D0=D0, seed=0, basin_edge=A)
 
 
 @pytest.fixture(scope="module")
@@ -100,6 +87,7 @@ def test_bundle_carries_every_constructor_reduction_and_the_baseline(bundle):
         assert out["profiles"]["D_q"][name].shape == (25,)
         assert out["profiles"]["flux"][name].shape == (25,)
     assert out["profiles"]["levels"].shape == (25,) and out["profiles"]["pi"].shape == (25,)
+    assert out["profiles"]["counts"].sum() == rw.sample_weights.shape[0]
     assert out["q_samples"].shape == (rw.sample_weights.shape[0],)
     assert out["committor"]["n_directions"] == 64 and out["committor"]["valid_fraction"] == 1.0
     assert np.isfinite(out["kramers"]["k_AB"]) and out["kramers"]["k_AB"] > 0
@@ -127,7 +115,7 @@ def test_strict_false_records_a_failed_constructor_instead_of_raising(dataset):
 
 def test_kramers_baseline_reads_the_barrier_of_the_pmf(dataset, bundle):
     rw, _ = bundle
-    out = pmf_kramers_rate(dataset, rw.sample_weights)
+    out = kramers_baseline(dataset, rw.sample_weights)
     assert np.isfinite(out["k_AB"]) and out["k_AB"] > 0
     assert out["delta_F_AB"] == pytest.approx(1.0, abs=0.3)
     assert abs(out["s_barrier"]) < 0.15

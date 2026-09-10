@@ -29,6 +29,6 @@ See [umbrella.md](../umbrella.md) for the walkthrough.
 .. automodule:: sliced_committor.umbrella.rates
    :members:
       fit_and_rate,
-      pmf_kramers_rate,
+      kramers_baseline,
       progress_coordinate
 ```

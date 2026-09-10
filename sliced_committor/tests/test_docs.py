@@ -22,7 +22,11 @@ import pytest
 import sliced_committor as sc
 from sliced_committor import umbrella
 
-from ._helpers import double_well_samples, overdamped_double_well_trajectory, umbrella_double_well
+from ._helpers import (
+    double_well_samples,
+    overdamped_double_well_trajectory,
+    umbrella_double_well_dataset,
+)
 
 ROOT = pathlib.Path(sc.__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -59,22 +63,7 @@ def namespace():
         X, in_A=jnp.asarray(in_A), in_B=jnp.asarray(in_B), n_directions=64, n_bins=60, seed=1
     )
     trajectory = overdamped_double_well_trajectory(T=5000, dt=0.01, D0=0.05, seed=1)
-    x, y, wid, centers, kappa = umbrella_double_well(
-        n_windows=6, n_per=2500, dt=0.01, D0=0.05, seed=0
-    )
-    dataset = umbrella.USDataset(
-        features=np.stack([x, y], axis=1),
-        cvs=x[:, None],
-        window_ids=wid,
-        window_centers=centers[:, None],
-        window_kappa=np.full((centers.size, 1), kappa),
-        beta=1.0,
-        dt=0.01,
-        in_A=x < -0.9,
-        in_B=x > 0.9,
-        cv_periodic=(None,),
-        meta={},
-    )
+    dataset = umbrella_double_well_dataset(n_windows=6, n_per=2500, dt=0.01, D0=0.05, seed=0)
     w = umbrella.reweight(dataset, method="wham", n_bins=60).sample_weights
     return dict(
         samples=X,

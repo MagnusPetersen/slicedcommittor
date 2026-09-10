@@ -25,7 +25,7 @@ from .io import (
     parse_restraint,
     read_colvar,
 )
-from .rates import fit_and_rate, pmf_kramers_rate, progress_coordinate
+from .rates import fit_and_rate, kramers_baseline, progress_coordinate
 from .reweight import mbar_weights, reduced_harmonic, reweight, wham_weights
 
 __all__ = [
@@ -48,6 +48,6 @@ __all__ = [
     "align_colvar_traj",
     # the committor and its rates
     "fit_and_rate",
-    "pmf_kramers_rate",
+    "kramers_baseline",
     "progress_coordinate",
 ]

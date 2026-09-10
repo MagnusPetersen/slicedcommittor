@@ -71,17 +71,22 @@ every diffusion constructor asked for and reduces it every way asked for:
   diagnostic (the restraint confines `s`, not `q`).
 * `"km_q"`: the Kramers-Moyal estimate on the committor at `lag`, which
   needs a diffusive regime the committor of a slow system lacks.
+
+`run_ids=` marks independent replicates; no estimator reads a displacement
+or an autocorrelation across a join. Like every fit, `fit_and_rate` needs
+`jax_enable_x64` to be on in your process; it does not switch it on for you.
 * `reductions=("plateau", "harmonic", "arithmetic")` by default, `"local"`
   on request.
 
 The bundle carries the fit diagnostics (`committor`), the per-sample
 committor (`q_samples`), the profiles on the `n_diff_bins` grid
-(`pi`, `grad_sq`, and per constructor `D_q` and `flux`), the rates per
-constructor and reduction, the label-free `flux_cv` per constructor, the
-committor-free Kramers baseline along the progress coordinate
-(`kramers`), and `errors`. With `strict=True` (the default) the first
-failing estimator raises; with `strict=False` it is recorded under
-`errors` and the others carry on.
+(`levels`, `counts`, `pi`, `grad_sq`, and per constructor `D_q` and
+`flux`), the rates per constructor and reduction, the label-free `flux_cv`
+per constructor, the committor-free Kramers baseline along the progress
+coordinate (`kramers`, also available as `kramers_baseline(dataset,
+weights)`), and `errors`. With `strict=True` (the default) the first
+failing estimator raises; with `strict=False` an estimator's `ValueError`
+or `RuntimeError` is recorded under `errors` and the others carry on.
 
 Rates are in inverse units of `dataset.dt`:
 

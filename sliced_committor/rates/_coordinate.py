@@ -44,7 +44,7 @@ def value_at(profile: Profile, level):
     if not np.any(good):
         raise ValueError("profile has no finite values to sample")
     if _is_range(level):
-        lo, hi = float(level[0]), float(level[1])
+        lo, hi = _check_band(level)
         mask = good & (centers >= lo) & (centers <= hi)
         return float(np.mean(values[mask])) if np.any(mask) else float("nan")
     arr = np.atleast_1d(np.asarray(level, dtype=np.float64))
@@ -73,8 +73,9 @@ def flux_flatness(profile: Profile, band) -> float:
 
 
 def _check_band(band):
+    """``(lo, hi)`` floats of a range along the coordinate; anything else is an error."""
     if not _is_range(band):
-        raise ValueError(f"a band is a (lo, hi) tuple of committor levels; got {band!r}")
+        raise ValueError(f"a band is a (lo, hi) tuple along the coordinate; got {band!r}")
     lo, hi = float(band[0]), float(band[1])
     if not lo < hi:
         raise ValueError(f"a band needs lo < hi; got ({lo}, {hi})")

@@ -20,6 +20,7 @@ through `solve_weights`; documented here for the record.
 .. automodule:: sliced_committor.core._halfset
    :members:
       make_folds,
+      pool_folds,
       halfset_grams,
       halfset_eigen_regularize,
       regularized_gram

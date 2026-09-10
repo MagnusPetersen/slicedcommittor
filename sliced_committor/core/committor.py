@@ -8,15 +8,36 @@ callable out) and :func:`build_committor` (from a slice basis and weights).
 """
 
 from collections.abc import Callable
-from functools import partial
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-from jax import jit
 
-from ._ebmc import Weights, solve_weights
-from .solver import SlicedCommittorResult, _qall_onthefly, compute_sliced_committor
+from ._ebmc import Weights, _require_x64, _rule, solve_weights
+from .solver import (
+    SlicedCommittorResult,
+    _basis_1d,
+    _combine,
+    _slice_matrix,
+    compute_sliced_committor,
+)
+
+# Points per evaluation batch: the (M, batch) slice matrix is the transient of
+# an evaluation or an autodiff pass, so this bounds it at any number of points
+# (bitwise identical to one call: every reduction is per point).
+_POINT_BATCH = 65536
+
+
+def _batched(fn, points, size=_POINT_BATCH):
+    """``fn`` over row batches of ``points``, the per-batch outputs (an array or a
+    tuple of arrays) concatenated; one call when the points fit in a batch."""
+    n = points.shape[0]
+    if n <= size:
+        return fn(points)
+    outs = [fn(points[i : i + size]) for i in range(0, n, size)]
+    if isinstance(outs[0], tuple):
+        return tuple(jnp.concatenate(parts) for parts in zip(*outs))
+    return jnp.concatenate(outs)
 
 
 class CommittorFit(NamedTuple):
@@ -33,14 +54,6 @@ class CommittorFit(NamedTuple):
         return self.weights.dirichlet_energy
 
 
-@partial(jit, static_argnames=("original_shape",))
-def _combine(q_all, w, c, valid_mask, original_shape):
-    """``c + sum_j w_j clip(q_j(x))`` over the valid slices."""
-    w_eff = w * valid_mask.astype(w.dtype)
-    q_clip = jnp.clip(q_all, 0.0, 1.0)
-    return (c + jnp.sum(w_eff[:, None] * q_clip, axis=0)).reshape(original_shape)
-
-
 def build_committor(
     result: SlicedCommittorResult, weights: Weights, *, clip: bool = True
 ) -> Callable:
@@ -50,22 +63,22 @@ def build_committor(
     point gives a scalar), clipped to ``[0, 1]`` unless ``clip=False``. Passing
     basin masks for the points snaps them to ``q = 0`` in A and ``q = 1`` in B;
     the gradient path never snaps. For a display-ready field see
-    :func:`rescale_transition`.
+    :func:`rescale_transition`. The callable holds only the slice basis and
+    the weights (not the fit's samples), and evaluates in batches of points.
     """
-    directions = result.directions
-    s_coords = result.slice_coords
-    q_1d = jnp.where(jnp.isnan(result.committors_1d), 0.0, result.committors_1d)
-    valid = jnp.asarray(result.valid_mask)
+    basis = _basis_1d(result)
     w = jnp.asarray(weights.w)
     c = float(weights.c)
+
+    def batch(points_flat):
+        return _combine(
+            _slice_matrix(basis, points_flat), w, c, basis.valid_mask, (points_flat.shape[0],)
+        )
 
     def committor(points, *, in_A=None, in_B=None):
         points = jnp.asarray(points)
         original_shape = points.shape[:-1]
-        points_flat = points.reshape(-1, points.shape[-1])
-        q = _combine(
-            _qall_onthefly(directions, s_coords, q_1d, points_flat), w, c, valid, original_shape
-        )
+        q = _batched(batch, points.reshape(-1, points.shape[-1])).reshape(original_shape)
         if clip:
             q = jnp.clip(q, 0.0, 1.0)
         if in_A is not None:
@@ -108,7 +121,7 @@ def committor_gradient(committor: Callable, points) -> jnp.ndarray:
     points = jnp.asarray(points)
     dim = points.shape[-1]
     original_shape = points.shape[:-1]
-    grads = jax.vmap(jax.grad(lambda x: committor(x)))(points.reshape(-1, dim))
+    grads = _batched(jax.vmap(jax.grad(committor)), points.reshape(-1, dim))
     return grads.reshape((*original_shape, dim))
 
 
@@ -144,6 +157,8 @@ def fit_committor(
             ``sample_weights``, ``directions``, ``direction_sampling``,
             ``feature_metric``, ...).
     """
+    _require_x64()  # fail before the slice build, not after it
+    _rule(tikhonov)
     result = compute_sliced_committor(
         jnp.asarray(samples),
         in_A=in_A,

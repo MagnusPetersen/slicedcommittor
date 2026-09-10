@@ -31,20 +31,8 @@ def golden_labels(golden_data):
 
 
 # ---------------------------------------------------------------------------
-# umbrella-subpackage helpers (synthetic only; mdtraj-gated where needed)
+# umbrella-subpackage fixtures (synthetic only; mdtraj-gated where needed)
 # ---------------------------------------------------------------------------
-def write_colvar(path, time, columns, fields, periodic=None):
-    """Write a minimal PLUMED COLVAR file; ``columns`` maps field name -> array."""
-    lines = [f"#! FIELDS {' '.join(fields)}"]
-    for name, (lo, hi) in (periodic or {}).items():
-        lines.append(f"#! SET min_{name} {lo}")
-        lines.append(f"#! SET max_{name} {hi}")
-    data = np.column_stack([time] + [columns[f] for f in fields if f != "time"])
-    body = "\n".join(" ".join(f"{v:.6f}" for v in row) for row in data)
-    path.write_text("\n".join(lines) + "\n" + body + "\n")
-    return path
-
-
 @pytest.fixture
 def synthetic_traj():
     """A tiny alanine-backbone mdtraj Trajectory factory (N, CA, C, O per residue)."""

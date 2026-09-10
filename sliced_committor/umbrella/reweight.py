@@ -22,6 +22,7 @@ import warnings
 import numpy as np
 from scipy.special import logsumexp
 
+from ..rates._numerics import bin_grid
 from .dataset import Reweighting, USDataset
 
 logger = logging.getLogger(__name__)
@@ -140,21 +141,18 @@ def _histogram_grid(cvs: np.ndarray, n_bins, pad_frac: float = 0.02):
     n_cv = cvs.shape[1]
     if np.isscalar(n_bins):
         n_bins = [int(n_bins)] * n_cv
-    edges = []
+    edges, centers_per_dim, idx_per_dim = [], [], []
     for d in range(n_cv):
         lo, hi = float(cvs[:, d].min()), float(cvs[:, d].max())
         span = hi - lo
         pad = pad_frac * span if span > 0 else 1.0
-        edges.append(np.linspace(lo - pad, hi + pad, n_bins[d] + 1))
-    # Per-dim bin index (clipped into range), then ravel to a flat bin id.
-    idx_per_dim = []
-    shape = []
-    for d in range(n_cv):
-        bi = np.clip(np.digitize(cvs[:, d], edges[d]) - 1, 0, n_bins[d] - 1)
-        idx_per_dim.append(bi)
-        shape.append(n_bins[d])
+        e, c = bin_grid(n_bins[d], (lo - pad, hi + pad))
+        edges.append(e)
+        centers_per_dim.append(c)
+        # per-dim bin index (clipped into range), then ravelled to a flat bin id
+        idx_per_dim.append(np.clip(np.digitize(cvs[:, d], e) - 1, 0, n_bins[d] - 1))
+    shape = [int(b) for b in n_bins]
     flat_idx = np.ravel_multi_index(idx_per_dim, shape)
-    centers_per_dim = [0.5 * (e[:-1] + e[1:]) for e in edges]
     mesh = np.meshgrid(*centers_per_dim, indexing="ij")
     bin_centers = np.stack([m.reshape(-1) for m in mesh], axis=1)  # (B, n_cv)
     return edges, flat_idx, bin_centers, tuple(shape)
@@ -223,10 +221,8 @@ def wham_weights(
 
     # Per-frame weight = bin probability shared equally among the bin's frames.
     p_b = np.where(occupied, np.exp(log_p), 0.0)
-    per_frame = np.zeros(cvs.shape[0])
-    nonzero = h_b > 0
     w_b = np.zeros(B)
-    w_b[nonzero] = p_b[nonzero] / h_b[nonzero]
+    w_b[occupied] = p_b[occupied] / h_b[occupied]
     per_frame = w_b[flat_idx]
     total = per_frame.sum()
     if total > 0:

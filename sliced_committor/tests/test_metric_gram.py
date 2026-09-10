@@ -17,7 +17,7 @@ from sliced_committor.core.gram import (
     validate_feature_metric,
 )
 
-from ._helpers import two_basin_samples
+from ._helpers import two_basin_samples, unit_directions
 
 
 def fit(samples, in_A, in_B, *, metric=None, directions=None, **kw):
@@ -33,12 +33,6 @@ def fit(samples, in_A, in_B, *, metric=None, directions=None, **kw):
 
 def basins(n=1200, dim=3, seed=0):
     return two_basin_samples(n=n, dim=dim, seed=seed, radius=1.1, sep=1.9)
-
-
-def unit_directions(dim, m, seed=11):
-    rng = np.random.default_rng(seed)
-    raw = rng.standard_normal((m, dim))
-    return jnp.asarray(raw / np.linalg.norm(raw, axis=1, keepdims=True))
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +165,7 @@ def test_halfset_is_only_approximately_scale_free():
 
 def test_an_absolute_ridge_does_not_co_scale():
     samples, in_A, in_B = basins(n=1000, seed=6)
-    M = np.diag([0.5, 1.0, 1.5]) * (3.0 / 3.0)
+    M = np.diag([0.5, 1.0, 1.5])
     w1 = np.asarray(fit(samples, in_A, in_B, metric=M, tikhonov=1e-3).weights.w)
     w2 = np.asarray(fit(samples, in_A, in_B, metric=1e4 * M, tikhonov=1e-3).weights.w)
     assert not np.allclose(w1, w2, rtol=1e-3)
@@ -233,7 +227,7 @@ def test_metric_rides_solver_kwargs_and_reaches_the_result():
 
 def test_metric_changes_the_weights_but_not_the_trial_space():
     samples, in_A, in_B = basins(n=600, seed=17)
-    M = np.diag([0.3, 1.0, 1.7]) * (3.0 / 3.0)
+    M = np.diag([0.3, 1.0, 1.7])
     theta = unit_directions(3, 24)
     ref = fit(samples, in_A, in_B, directions=theta)
     got = fit(samples, in_A, in_B, directions=theta, metric=M)

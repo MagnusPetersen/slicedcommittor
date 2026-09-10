@@ -13,11 +13,9 @@ coverage floor ``p >= alpha p_unif``.
 
 :class:`DirectionSamplingConfig` drives the draw inside
 :func:`sliced_committor.compute_sliced_committor`. The pieces are also public
-(:func:`compute_lda_axis`, :func:`sample_power_spherical_mixture`) because at
-large ``M`` it pays to build the cone OUTSIDE the solver and pass
-``directions=``: folding the sampling subgraph into the jitted solver blows
-the XLA constants budget, which is how the paper's molecular runs draw their
-directions.
+(:func:`compute_lda_axis`, :func:`sample_power_spherical_mixture`) so the
+axis can be inspected, replaced by a coordinate of your own, or the draw
+reproduced outside the solver and passed back as ``directions=``.
 """
 
 import warnings
@@ -130,23 +128,20 @@ def _sample_power_spherical(key, axis, n: int, dim: int, kappa):
     return t[:, None] * axis[None, :] + sqrt_1mt2[:, None] * w
 
 
-def sample_power_spherical_mixture(
-    key, bias_axes, n_directions: int, dim: int, *, mu=0.0, alpha=1.0, axis_weights=None
-):
+def sample_power_spherical_mixture(key, axis, n_directions: int, dim: int, *, mu=0.0, alpha=1.0):
     """Stratified mixture of uniform and power-spherical directions on the sphere.
 
     Args:
         key: JAX PRNG key.
-        bias_axes: ``(K, dim)`` unit axes, or None for pure uniform.
+        axis: ``(dim,)`` unit axis of the cone, or None for pure uniform.
         n_directions: total number of directions.
         dim: ambient dimension (>= 2).
         mu: mean cosine of the power-spherical component, in ``[0, 1)``.
         alpha: uniform mixture weight in ``[0, 1]``.
-        axis_weights: ``(K,)`` simplex weights over the axes; uniform by default.
 
-    Stratification is exact: ``round((1 - alpha) beta_k N)`` directions per
-    axis, the rounding drift absorbed by the uniform bucket. The output order
-    (uniform rows first, then each axis) is an implementation detail.
+    Stratification is exact: ``round((1 - alpha) N)`` directions in the cone
+    and the rest uniform. The output order (uniform rows first) is an
+    implementation detail.
     """
     if dim < 2:
         raise ValueError(f"dim must be >= 2, got {dim}")
@@ -154,45 +149,25 @@ def sample_power_spherical_mixture(
         raise ValueError(f"mu must be in [0, 1), got {mu}")
     if not (0.0 <= alpha <= 1.0):
         raise ValueError(f"alpha must be in [0, 1], got {alpha}")
-    if bias_axes is None or alpha >= 1.0:
+    if axis is None or alpha >= 1.0:
         return directions_uniform(key, n_directions, dim)
 
-    bias_axes = jnp.asarray(bias_axes)
-    if bias_axes.ndim != 2 or bias_axes.shape[1] != dim:
-        raise ValueError(f"bias_axes must have shape (K, dim={dim}), got {bias_axes.shape}")
-    norms = jnp.linalg.norm(bias_axes, axis=-1)
-    if bool(jnp.any(jnp.abs(norms - 1.0) > 1e-4)):
-        warnings.warn("sample_power_spherical_mixture: renormalizing bias_axes rows.", stacklevel=2)
-    bias_axes = _normalize_rows(bias_axes, eps=1e-12)
-    K = int(bias_axes.shape[0])
+    axis = jnp.asarray(axis)
+    if axis.shape != (dim,):
+        raise ValueError(f"axis must have shape (dim={dim},), got {axis.shape}")
+    if bool(jnp.abs(jnp.linalg.norm(axis) - 1.0) > 1e-4):
+        warnings.warn("sample_power_spherical_mixture: renormalizing the axis.", stacklevel=2)
+    axis = axis / jnp.maximum(jnp.linalg.norm(axis), 1e-12)
 
-    import numpy as np
-
-    if axis_weights is None:
-        beta_w = np.ones(K, dtype=np.float64) / K
-    else:
-        beta_w = np.asarray(axis_weights, dtype=np.float64)
-        if beta_w.shape != (K,):
-            raise ValueError(f"axis_weights must have shape ({K},), got {beta_w.shape}")
-        if not np.isclose(float(beta_w.sum()), 1.0, atol=1e-6):
-            raise ValueError(f"axis_weights must sum to 1, got {float(beta_w.sum())}")
-
-    n_per_axis = [int(round((1.0 - alpha) * float(beta_w[k]) * n_directions)) for k in range(K)]
-    n_uniform = int(n_directions - sum(n_per_axis))
-    if n_uniform < 0:
-        n_per_axis[int(np.argmax(n_per_axis))] += n_uniform
-        n_uniform = 0
-
-    keys = random.split(key, K + 1)
-    kappa = jnp.asarray(mu * (dim - 1.0) / (1.0 - mu), dtype=bias_axes.dtype)
+    n_cone = int(round((1.0 - alpha) * n_directions))
+    n_uniform = n_directions - n_cone
+    key_uniform, key_cone = random.split(key)
+    kappa = jnp.asarray(mu * (dim - 1.0) / (1.0 - mu), dtype=axis.dtype)
     parts = []
     if n_uniform > 0:
-        parts.append(directions_uniform(keys[0], n_uniform, dim))
-    for k in range(K):
-        if n_per_axis[k] > 0:
-            parts.append(
-                _sample_power_spherical(keys[k + 1], bias_axes[k], n_per_axis[k], dim, kappa)
-            )
+        parts.append(directions_uniform(key_uniform, n_uniform, dim))
+    if n_cone > 0:
+        parts.append(_sample_power_spherical(key_cone, axis, n_cone, dim, kappa))
     return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=0)
 
 
@@ -223,7 +198,7 @@ def _sample_directions(key, n_directions, dim, samples, in_A, in_B, cfg: Directi
             stacklevel=2,
         )
     directions = sample_power_spherical_mixture(
-        key, axis[None, :], n_directions, dim, mu=float(cfg.mu), alpha=float(cfg.alpha)
+        key, axis, n_directions, dim, mu=float(cfg.mu), alpha=float(cfg.alpha)
     )
     info["mu"] = float(cfg.mu)
     info["alpha"] = float(cfg.alpha)

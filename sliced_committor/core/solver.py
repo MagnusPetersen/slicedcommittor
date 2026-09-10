@@ -22,6 +22,7 @@ beta is fixed at 1: it cancels in every downstream quantity, so
 ``free_energies`` stores ``-log rho`` directly.
 """
 
+import warnings
 from functools import partial
 from typing import NamedTuple
 
@@ -121,7 +122,7 @@ class SlicedCommittorResult(NamedTuple):
 def _interp_1d_at_samples(s_grid, y_grid, s_samples):
     """Linear interpolation of grid values at sample positions (non-uniform grids)."""
     n = s_grid.shape[0]
-    idx = jnp.searchsorted(s_grid, s_samples, side="right") - 1
+    idx = jnp.searchsorted(s_grid, s_samples, side="right", method="scan_unrolled") - 1
     idx = jnp.clip(idx, 0, n - 2)
     ds = s_grid[idx + 1] - s_grid[idx]
     frac = (s_samples - s_grid[idx]) / jnp.maximum(ds, 1e-10)
@@ -129,15 +130,29 @@ def _interp_1d_at_samples(s_grid, y_grid, s_samples):
     return (1 - frac) * y_grid[idx] + frac * y_grid[idx + 1]
 
 
-@jit
-def _interp_committor_at_samples(s_grid, q_grid, s_samples):
-    """Interpolate q(s) at sample positions, clamped to the grid end values."""
-    q_interp = _interp_1d_at_samples(s_grid, q_grid, s_samples)
-    q_interp = jnp.clip(q_interp, 0.0, 1.0)
-    s_min, s_max = s_grid[0], s_grid[-1]
-    q_interp = jnp.where(s_samples < s_min, q_grid[0], q_interp)
-    q_interp = jnp.where(s_samples > s_max, q_grid[-1], q_interp)
-    return q_interp
+def _interp_committor(s_grid, q_grid, s_samples):
+    """A slice committor at sample positions, clipped to ``[0, 1]``."""
+    return jnp.clip(_interp_1d_at_samples(s_grid, q_grid, s_samples), 0.0, 1.0)
+
+
+class _Basis1D(NamedTuple):
+    """What evaluating the committor needs from a fit: the directions, the
+    slice grids, the NaN-free 1D committors and the validity mask. A callable
+    built on it holds none of the fit's samples."""
+
+    directions: jnp.ndarray
+    slice_coords: jnp.ndarray
+    committors_1d: jnp.ndarray
+    valid_mask: jnp.ndarray
+
+
+def _basis_1d(result) -> _Basis1D:
+    return _Basis1D(
+        result.directions,
+        result.slice_coords,
+        jnp.where(jnp.isnan(result.committors_1d), 0.0, result.committors_1d),
+        jnp.asarray(result.valid_mask),
+    )
 
 
 @jit
@@ -148,6 +163,19 @@ def _qall_onthefly(directions, s_coords, q_1d, points_flat):
         return _interp_1d_at_samples(s_grid, q_grid, points_flat @ theta)
 
     return vmap(per_dir, in_axes=(0, 0, 0))(directions, s_coords, q_1d)
+
+
+def _slice_matrix(basis: _Basis1D, points_flat):
+    """``(M, P)`` slice committors at the points."""
+    return _qall_onthefly(basis.directions, basis.slice_coords, basis.committors_1d, points_flat)
+
+
+@partial(jit, static_argnames=("original_shape",))
+def _combine(q_all, w, c, valid_mask, original_shape):
+    """``c + sum_j w_j clip(q_j(x))`` over the valid slices."""
+    w_eff = w * valid_mask.astype(w.dtype)
+    q_clip = jnp.clip(q_all, 0.0, 1.0)
+    return (c + jnp.sum(w_eff[:, None] * q_clip, axis=0)).reshape(original_shape)
 
 
 # =============================================================================
@@ -186,30 +214,24 @@ def compute_1d_free_energy(
     s_min, s_max = jnp.min(s), jnp.max(s)
     span = jnp.maximum(s_max - s_min, 1e-8)
 
-    if binning_method == "quantile" and use_subsample_quantile:
-        s_sorted = jnp.sort(s_subsample)
-        K = s_subsample.shape[0]
-        edge_indices = jnp.linspace(0, K - 1, n_bins + 1).astype(jnp.int32)
+    if binning_method == "quantile":
+        # Edges at the quantiles of the subsample (large N) or of all samples;
+        # exact quantile bins hold N / n_bins samples each by construction.
+        src = s_subsample if use_subsample_quantile else s
+        s_sorted = jnp.sort(src)
+        edge_indices = jnp.linspace(0, src.shape[0] - 1, n_bins + 1).astype(jnp.int32)
         bin_edges = s_sorted[edge_indices]
         s_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
         ds_per_bin = jnp.maximum(bin_edges[1:] - bin_edges[:-1], 1e-10)
         N_total = s.shape[0]
-        bin_idx = jnp.clip(jnp.searchsorted(bin_edges[1:-1], s), 0, n_bins - 1)
-        counts = jnp.zeros(n_bins).at[bin_idx].add(jnp.ones(N_total))
+        if use_subsample_quantile:
+            bin_idx = jnp.clip(jnp.searchsorted(bin_edges[1:-1], s), 0, n_bins - 1)
+            counts = jnp.zeros(n_bins).at[bin_idx].add(jnp.ones(N_total))
+        else:
+            counts = N_total / n_bins
         N = jnp.float64(N_total)
         effective_floor = jnp.maximum(n_min / (N * ds_per_bin), density_floor)
         density = jnp.maximum(counts / (N * ds_per_bin), effective_floor)
-    elif binning_method == "quantile":
-        s_sorted = jnp.sort(s)
-        N_total = s.shape[0]
-        edge_indices = jnp.linspace(0, N_total - 1, n_bins + 1).astype(jnp.int32)
-        bin_edges = s_sorted[edge_indices]
-        s_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        ds_per_bin = jnp.maximum(bin_edges[1:] - bin_edges[:-1], 1e-10)
-        counts_per_bin = N_total / n_bins
-        N = jnp.float64(N_total)
-        effective_floor = jnp.maximum(n_min / (N * ds_per_bin), density_floor)
-        density = jnp.maximum(counts_per_bin / (N * ds_per_bin), effective_floor)
     else:
         bin_edges = jnp.linspace(s_min, s_max, n_bins + 1)
         s_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
@@ -230,40 +252,30 @@ def compute_1d_free_energy(
 
 
 def _inner_edge_index(s_sorted, quantile, high):
-    """Index of the ``quantile`` inner edge in a sorted state projection."""
+    """Index of the ``quantile`` inner edge in a sorted state projection.
+
+    ``high`` (traced bool) selects the upper edge, else the lower one; at
+    ``quantile = 1`` the edge is the extreme sample.
+    """
     n = s_sorted.shape[0]
-    if high:
-        return jnp.clip(jnp.floor(quantile * (n - 1)).astype(jnp.int32), 0, n - 1)
-    return jnp.clip(jnp.ceil((1.0 - quantile) * (n - 1)).astype(jnp.int32), 0, n - 1)
+    upper = jnp.floor(quantile * (n - 1)).astype(jnp.int32)
+    lower = jnp.ceil((1.0 - quantile) * (n - 1)).astype(jnp.int32)
+    return jnp.clip(jnp.where(high, upper, lower), 0, n - 1)
 
 
 def find_boundary_indices(s_values, s_A_sorted, s_B_sorted, boundary_quantile=1.0):
     """Grid indices of the inner basin edges along one slice.
 
-    The basin facing edges are the extreme projections (``boundary_quantile
-    = 1``) or the ``boundary_quantile`` quantiles of the sorted state
-    projections (``< 1`` shrinks the edges toward the basin centres, which
-    mitigates the halo of a basin projected from many nuisance dimensions).
+    The basin-facing edges are the ``boundary_quantile`` quantiles of the
+    sorted state projections: the extreme projections at 1, and edges shrunk
+    toward the basin centres below 1 (which mitigates the halo of a basin
+    projected from many nuisance dimensions).
     Returns ``(a_idx, b_idx)`` with ``a_idx <= b_idx``; the interval is always
     defined, overlapping basins simply give a narrow one.
     """
     A_is_left = jnp.mean(s_A_sorted) < jnp.mean(s_B_sorted)
-    s_A_extreme = jnp.where(A_is_left, s_A_sorted[-1], s_A_sorted[0])
-    s_B_extreme = jnp.where(A_is_left, s_B_sorted[0], s_B_sorted[-1])
-
-    s_A_quantile = jnp.where(
-        A_is_left,
-        s_A_sorted[_inner_edge_index(s_A_sorted, boundary_quantile, True)],
-        s_A_sorted[_inner_edge_index(s_A_sorted, boundary_quantile, False)],
-    )
-    s_B_quantile = jnp.where(
-        A_is_left,
-        s_B_sorted[_inner_edge_index(s_B_sorted, boundary_quantile, False)],
-        s_B_sorted[_inner_edge_index(s_B_sorted, boundary_quantile, True)],
-    )
-    use_quantile = boundary_quantile < 1.0
-    s_A_inner = jnp.where(use_quantile, s_A_quantile, s_A_extreme)
-    s_B_inner = jnp.where(use_quantile, s_B_quantile, s_B_extreme)
+    s_A_inner = s_A_sorted[_inner_edge_index(s_A_sorted, boundary_quantile, A_is_left)]
+    s_B_inner = s_B_sorted[_inner_edge_index(s_B_sorted, boundary_quantile, ~A_is_left)]
     s_left = jnp.minimum(s_A_inner, s_B_inner)
     s_right = jnp.maximum(s_A_inner, s_B_inner)
 
@@ -286,13 +298,7 @@ def find_boundary_indices(s_values, s_A_sorted, s_B_sorted, boundary_quantile=1.
 
 def _absorption_keep_mask(s_grid, s_sorted, is_left, quantile):
     """True where a basin's absorption density is retained (inside its inner-edge quantile)."""
-    n = s_sorted.shape[0]
-    idx = jnp.where(
-        is_left,
-        jnp.clip(jnp.floor(quantile * (n - 1)).astype(jnp.int32), 0, n - 1),
-        jnp.clip(jnp.ceil((1.0 - quantile) * (n - 1)).astype(jnp.int32), 0, n - 1),
-    )
-    cutoff = s_sorted[idx]
+    cutoff = s_sorted[_inner_edge_index(s_sorted, quantile, is_left)]
     return jnp.where(is_left, s_grid <= cutoff, s_grid >= cutoff)
 
 
@@ -304,7 +310,7 @@ def compute_1d_rd_committor(
     *,
     rd_kappa,
     ds_arr,
-    absorption_quantile,
+    boundary_quantile,
     s_A_sorted,
     s_B_sorted,
 ):
@@ -314,7 +320,7 @@ def compute_1d_rd_committor(
     with Neumann ends, i.e. solves ``d/ds[rho dq/ds] = kappa [rho_A q - rho_B (1-q)]``.
     Distributing the absorption through the basin bulks fixes the orientation
     ``q -> 0`` in A and ``q -> 1`` in B without any inversion step.
-    ``absorption_quantile < 1`` zeroes ``rho_A``, ``rho_B`` past the inner-edge
+    ``boundary_quantile < 1`` zeroes ``rho_A``, ``rho_B`` past the inner-edge
     quantile of the state projections (the halo tail).
     """
     n = s_values.shape[0]
@@ -332,13 +338,13 @@ def compute_1d_rd_committor(
     rho_A = _state_density(s_A_proj)
     rho_B = _state_density(s_B_proj)
 
-    if absorption_quantile < 1.0:
+    if boundary_quantile < 1.0:
         A_is_left = jnp.mean(s_A_proj) < jnp.mean(s_B_proj)
         rho_A = jnp.where(
-            _absorption_keep_mask(s_values, s_A_sorted, A_is_left, absorption_quantile), rho_A, 0.0
+            _absorption_keep_mask(s_values, s_A_sorted, A_is_left, boundary_quantile), rho_A, 0.0
         )
         rho_B = jnp.where(
-            _absorption_keep_mask(s_values, s_B_sorted, ~A_is_left, absorption_quantile), rho_B, 0.0
+            _absorption_keep_mask(s_values, s_B_sorted, ~A_is_left, boundary_quantile), rho_B, 0.0
         )
 
     # Tridiagonal system of the finite-difference discretisation.
@@ -423,6 +429,98 @@ def _compute_log_dirichlet(s_vals, F_vals, q_vals, ds_arr):
 # =============================================================================
 
 
+class _SliceInputs(NamedTuple):
+    """The arrays every slice reads: the samples, the basin index sets, the
+    basin sample weights with their sums (None for uniform weights), and the
+    quantile subsample index (None below the size threshold)."""
+
+    samples: jnp.ndarray
+    A_indices: jnp.ndarray
+    B_indices: jnp.ndarray
+    W_A: jnp.ndarray | None
+    W_B: jnp.ndarray | None
+    sumWA: jnp.ndarray | None
+    sumWB: jnp.ndarray | None
+    subsample_idx: jnp.ndarray | None
+
+
+class _SliceSettings(NamedTuple):
+    """The static settings of the 1D problem (hashable: one compile per value)."""
+
+    n_bins: int
+    binning_method: str
+    density_floor: float
+    n_min: int
+    rd_kappa: float
+    boundary_quantile: float
+    use_subsample: bool
+
+
+@partial(jit, static_argnames=("settings",))
+def _slices(directions, inputs: _SliceInputs, settings: _SliceSettings):
+    """The 1D problem on every direction: projection, free energy, RD committor,
+    inner edges and the fused per-slice diagnostics, vmapped over ``directions``.
+    Compiled once per shape and setting; the arrays enter as arguments."""
+    n_A_f = jnp.float32(inputs.A_indices.shape[0])
+    n_B_f = jnp.float32(inputs.B_indices.shape[0])
+
+    def _slice(theta):
+        s_projected = inputs.samples @ theta
+        s_sub = s_projected[inputs.subsample_idx] if settings.use_subsample else None
+        s_vals, F_vals = compute_1d_free_energy(
+            s_projected,
+            settings.n_bins,
+            density_floor=settings.density_floor,
+            binning_method=settings.binning_method,
+            n_min=settings.n_min,
+            s_subsample=s_sub,
+            use_subsample_quantile=settings.use_subsample,
+        )
+        ds_arr = jnp.diff(s_vals)
+        ds_arr = jnp.concatenate([ds_arr, ds_arr[-1:]])
+        s_A = s_projected[inputs.A_indices]
+        s_B = s_projected[inputs.B_indices]
+        s_A_sorted = jnp.sort(s_A)
+        s_B_sorted = jnp.sort(s_B)
+        a_idx, b_idx = find_boundary_indices(
+            s_vals, s_A_sorted, s_B_sorted, settings.boundary_quantile
+        )
+        q_rd = compute_1d_rd_committor(
+            s_vals,
+            F_vals,
+            s_A,
+            s_B,
+            rd_kappa=settings.rd_kappa,
+            ds_arr=ds_arr,
+            boundary_quantile=settings.boundary_quantile,
+            s_A_sorted=s_A_sorted,
+            s_B_sorted=s_B_sorted,
+        )
+        is_valid = jnp.all(jnp.isfinite(q_rd))
+        log_D = jnp.where(is_valid, _compute_log_dirichlet(s_vals, F_vals, q_rd, ds_arr), jnp.inf)
+        q_rd_safe = jnp.where(jnp.isnan(q_rd), 0.0, q_rd)
+        q_A = _interp_committor(s_vals, q_rd_safe, s_A)
+        q_B = _interp_committor(s_vals, q_rd_safe, s_B)
+        if inputs.W_A is None:
+            eps_A = jnp.sum(q_A) / n_A_f
+            eps_B = jnp.sum(1.0 - q_B) / n_B_f
+        else:
+            eps_A = jnp.sum(inputs.W_A * q_A) / jnp.maximum(inputs.sumWA, 1e-30)
+            eps_B = jnp.sum(inputs.W_B * (1.0 - q_B)) / jnp.maximum(inputs.sumWB, 1e-30)
+        return (
+            s_vals,
+            F_vals,
+            q_rd,
+            jnp.stack([a_idx, b_idx]),
+            is_valid,
+            log_D,
+            eps_A + eps_B,
+            s_projected,
+        )
+
+    return vmap(_slice)(directions)
+
+
 def compute_sliced_committor(
     samples,
     *,
@@ -462,7 +560,9 @@ def compute_sliced_committor(
             many nuisance dimensions inflate around a projected basin.
         direction_batch_size: process the directions in batches of this size
             to bound the ``(batch, N)`` working memory; None = one vmap.
-        sample_weights: ``(N,)`` reweighting (e.g. MBAR); None = uniform.
+        sample_weights: ``(N,)`` reweighting (e.g. MBAR) summing to one; None
+            = uniform. The weights are used verbatim, so the reported
+            Dirichlet energies of fits are comparable only on that scale.
         directions: ``(M, dim)`` pre-supplied directions; overrides the draw.
         direction_sampling: :class:`DirectionSamplingConfig` for the LDA cone
             (``mode='lda'``); None or ``mode='uniform'`` draws uniformly.
@@ -508,8 +608,6 @@ def compute_sliced_committor(
     if not (0.0 < boundary_quantile <= 1.0):
         raise ValueError(f"boundary_quantile must be in (0, 1]; got {boundary_quantile}")
     if dim > n_samples_total:
-        import warnings
-
         warnings.warn(
             f"samples.shape={samples.shape}: dim ({dim}) exceeds N ({n_samples_total}). "
             "Per-slice density estimation is fragile in this regime; consider "
@@ -521,16 +619,23 @@ def compute_sliced_committor(
 
     A_indices = jnp.nonzero(in_A, size=n_A)[0]
     B_indices = jnp.nonzero(in_B, size=n_B)[0]
-    n_A_f = jnp.float32(n_A)
-    n_B_f = jnp.float32(n_B)
 
     if sample_weights is None:
-        W_A_norm = W_B_norm = sumWA = sumWB = None
+        W_A = W_B = sumWA = sumWB = None
     else:
-        sample_weights = jnp.asarray(sample_weights)
-        W_norm = sample_weights / jnp.maximum(jnp.sum(sample_weights), 1e-30)
-        W_A_norm, W_B_norm = W_norm[A_indices], W_norm[B_indices]
-        sumWA, sumWB = jnp.sum(W_A_norm), jnp.sum(W_B_norm)
+        sample_weights = jnp.asarray(sample_weights, jnp.float64)
+        if sample_weights.shape != (n_samples_total,):
+            raise ValueError(
+                f"sample_weights must be (N,); got {sample_weights.shape}, N={n_samples_total}"
+            )
+        total = float(jnp.sum(sample_weights))
+        if not abs(total - 1.0) <= 1e-6:
+            raise ValueError(
+                f"sample_weights must sum to one (got {total!r}): normalise them first, the "
+                "solve uses them verbatim."
+            )
+        W_A, W_B = sample_weights[A_indices], sample_weights[B_indices]
+        sumWA, sumWB = jnp.sum(W_A), jnp.sum(W_B)
 
     # Directions: pre-supplied > config > uniform.
     lda_info = None
@@ -543,8 +648,6 @@ def compute_sliced_committor(
             )
         n_directions = directions.shape[0]
         if direction_sampling is not None:
-            import warnings
-
             warnings.warn(
                 "Both `directions` and `direction_sampling` were supplied; ignoring "
                 "`direction_sampling` because pre-supplied `directions` take precedence.",
@@ -569,64 +672,15 @@ def compute_sliced_committor(
     else:
         subsample_idx = None
 
-    def _slice(theta):
-        s_projected = samples @ theta
-        s_sub = s_projected[subsample_idx] if use_subsample else None
-        s_vals, F_vals = compute_1d_free_energy(
-            s_projected,
-            n_bins,
-            density_floor=density_floor,
-            binning_method=binning_method,
-            n_min=n_min,
-            s_subsample=s_sub,
-            use_subsample_quantile=use_subsample,
-        )
-        ds_arr = jnp.diff(s_vals)
-        ds_arr = jnp.concatenate([ds_arr, ds_arr[-1:]])
-        s_A = s_projected[A_indices]
-        s_B = s_projected[B_indices]
-        s_A_sorted = jnp.sort(s_A)
-        s_B_sorted = jnp.sort(s_B)
-        a_idx, b_idx = find_boundary_indices(s_vals, s_A_sorted, s_B_sorted, boundary_quantile)
-        q_rd = compute_1d_rd_committor(
-            s_vals,
-            F_vals,
-            s_A,
-            s_B,
-            rd_kappa=rd_kappa,
-            ds_arr=ds_arr,
-            absorption_quantile=boundary_quantile,
-            s_A_sorted=s_A_sorted,
-            s_B_sorted=s_B_sorted,
-        )
-        is_valid = jnp.all(jnp.isfinite(q_rd))
-        log_D = jnp.where(is_valid, _compute_log_dirichlet(s_vals, F_vals, q_rd, ds_arr), jnp.inf)
-        q_rd_safe = jnp.where(jnp.isnan(q_rd), 0.0, q_rd)
-        q_A = _interp_committor_at_samples(s_vals, q_rd_safe, s_A)
-        q_B = _interp_committor_at_samples(s_vals, q_rd_safe, s_B)
-        if W_A_norm is None:
-            eps_A = jnp.sum(q_A) / jnp.maximum(n_A_f, 1.0)
-            eps_B = jnp.sum(1.0 - q_B) / jnp.maximum(n_B_f, 1.0)
-        else:
-            eps_A = jnp.sum(W_A_norm * q_A) / jnp.maximum(sumWA, 1e-30)
-            eps_B = jnp.sum(W_B_norm * (1.0 - q_B)) / jnp.maximum(sumWB, 1e-30)
-        return (
-            s_vals,
-            F_vals,
-            q_rd,
-            jnp.stack([a_idx, b_idx]),
-            is_valid,
-            log_D,
-            eps_A + eps_B,
-            s_projected,
-        )
-
-    batched = jit(vmap(_slice, in_axes=0))
+    inputs = _SliceInputs(samples, A_indices, B_indices, W_A, W_B, sumWA, sumWB, subsample_idx)
+    settings = _SliceSettings(
+        n_bins, binning_method, density_floor, n_min, rd_kappa, boundary_quantile, use_subsample
+    )
     if direction_batch_size is None or direction_batch_size >= n_directions:
-        out = batched(directions)
+        out = _slices(directions, inputs, settings)
     else:
         parts = [
-            batched(directions[start : start + direction_batch_size])
+            _slices(directions[start : start + direction_batch_size], inputs, settings)
             for start in range(0, n_directions, direction_batch_size)
         ]
         out = tuple(jnp.concatenate([p[k] for p in parts], axis=0) for k in range(len(parts[0])))

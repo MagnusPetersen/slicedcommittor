@@ -70,9 +70,12 @@ def test_no_undeclared_public_names_in_the_package_namespace():
 
 
 def test_import_is_light():
+    """Neither the package nor the umbrella subpackage pulls an optional or slow
+    dependency at import (mdtraj, pymbar and matplotlib are on-use only, and
+    scipy.stats is only needed by the reparametrisation route)."""
     code = (
-        "import sys, sliced_committor; "
-        "heavy = {'mdtraj', 'matplotlib', 'pymbar'} & set(sys.modules); "
+        "import sys, sliced_committor, sliced_committor.umbrella; "
+        "heavy = {'mdtraj', 'matplotlib', 'pymbar', 'scipy.stats'} & set(sys.modules); "
         "print(sorted(heavy))"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)

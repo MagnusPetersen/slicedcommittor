@@ -4,7 +4,7 @@ import numpy as np
 
 from sliced_committor.umbrella import io
 
-from .conftest import write_colvar
+from ._helpers import write_colvar
 
 
 def test_colvar_1d_q(tmp_path):

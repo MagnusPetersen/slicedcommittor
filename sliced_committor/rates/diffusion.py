@@ -19,17 +19,20 @@ Three estimators of the diffusion coefficient of a coordinate ``x(t)``:
 
 All three take the coordinate's per-frame VALUES, ``q(trajectory)`` or a
 collective variable: diffusion is a property of a time series, not of the
-committor function. ``run_ids`` mark independent contiguous runs. An
-autocorrelation is only defined within one run, and splicing the replicates of
-a window end to end reads the joins as slow correlation (``tau_int`` inflated
-by up to 77% on chignolin).
+committor function. ``run_ids`` mark independent contiguous runs, and no
+estimator reads across a join: an autocorrelation is only defined within one
+run (splicing the replicates of a window end to end reads the joins as slow
+correlation, ``tau_int`` inflated by up to 77% on chignolin), and a
+displacement pair is only a displacement within one run.
 """
 
 from typing import NamedTuple
 
 import numpy as np
 
-from ._coordinate import Profile
+from .._runs import segment_ids
+from ._coordinate import Profile, _check_band
+from ._numerics import bin_grid, per_frame
 
 
 # ---------------------------------------------------------------------------
@@ -82,30 +85,29 @@ def _hummer(x, dt):
     return D if (np.isfinite(D) and D > 0.0) else float("nan")
 
 
+def _runs(n, window_ids, run_ids):
+    """``(window labels or None, run index per frame)``: the runs are the
+    contiguous stretches over which window and replicate are both constant."""
+    wid = per_frame("window_ids", window_ids, n)
+    rid = per_frame("run_ids", run_ids, n)
+    labels = [ids for ids in (wid, rid) if ids is not None] or [np.zeros(n, np.int64)]
+    return wid, segment_ids(*labels)
+
+
 def _windows(coordinate, window_ids, run_ids):
     """Yield ``(window mask, [index array per contiguous run])`` per window."""
     x = np.asarray(coordinate, dtype=np.float64).reshape(-1)
-    wid = np.asarray(window_ids).reshape(-1)
-    if wid.shape[0] != x.shape[0]:
-        raise ValueError(f"window_ids length {wid.shape[0]} != trajectory length {x.shape[0]}")
-    rid = None if run_ids is None else np.asarray(run_ids).reshape(-1)
-    if rid is not None and rid.shape[0] != x.shape[0]:
-        raise ValueError(f"run_ids length {rid.shape[0]} != trajectory length {x.shape[0]}")
+    wid, seg = _runs(x.shape[0], window_ids, run_ids)
     for k in np.unique(wid):
         m = wid == k
-        if rid is None:
-            yield m, [np.flatnonzero(m)]
-        else:
-            yield m, [np.flatnonzero(m & (rid == r)) for r in np.unique(rid[m])]
+        yield m, [np.flatnonzero(seg == s) for s in np.unique(seg[m])]
 
 
 # ---------------------------------------------------------------------------
 # Kramers-Moyal / mean squared displacement
 # ---------------------------------------------------------------------------
-def _km_lumped(x, bin_idx, lag, dt, n_bins, min_count):
-    """Drift-corrected Kramers-Moyal ``D`` per bin, one contiguous trajectory."""
-    dx = x[lag:] - x[:-lag]
-    bins = bin_idx[:-lag]
+def _km_lumped(dx, bins, lag, dt, n_bins, min_count):
+    """Drift-corrected Kramers-Moyal ``D`` per bin of the displacements, one population."""
     counts = np.bincount(bins, minlength=n_bins)
     safe = np.maximum(counts, 1)
     mean_dx = np.bincount(bins, weights=dx, minlength=n_bins) / safe
@@ -114,22 +116,16 @@ def _km_lumped(x, bin_idx, lag, dt, n_bins, min_count):
     return np.where(counts >= min_count, D, np.nan), counts
 
 
-def _km_stratified(x, bin_idx, window_ids, lag, dt, n_bins, min_count):
+def _km_stratified(dx, bins, window_of_pair, lag, dt, n_bins, min_count):
     """Window-stratified drift-corrected Kramers-Moyal ``D`` per bin.
 
-    Pairs are kept only within one window and the per-(window, bin) variances
-    are pooled with a Bessel correction, which removes the drift the umbrella
-    restraints induce between windows.
+    The per-(window, bin) variances of the displacements are pooled with a
+    Bessel correction, which removes the drift the umbrella restraints induce
+    between windows.
     """
-    wid = np.asarray(window_ids).reshape(-1)
-    if wid.shape[0] != x.shape[0]:
-        raise ValueError(f"window_ids length {wid.shape[0]} != trajectory length {x.shape[0]}")
-    same = wid[:-lag] == wid[lag:]
-    if not np.any(same):
+    if dx.size == 0:
         return np.full(n_bins, np.nan), np.zeros(n_bins, dtype=np.int64)
-    dx = (x[lag:] - x[:-lag])[same]
-    bins = bin_idx[:-lag][same]
-    _, win = np.unique(wid[:-lag][same], return_inverse=True)
+    _, win = np.unique(window_of_pair, return_inverse=True)
     K = int(win.max()) + 1
     flat = win * n_bins + bins
     n_kb = np.bincount(flat, minlength=K * n_bins)
@@ -149,14 +145,23 @@ def _km_stratified(x, bin_idx, window_ids, lag, dt, n_bins, min_count):
 
 
 def diffusion_profile(
-    coordinate, *, dt, lag, window_ids=None, n_bins=200, span=(0.0, 1.0), min_count=5
+    coordinate,
+    *,
+    dt,
+    lag,
+    window_ids=None,
+    run_ids=None,
+    n_bins=200,
+    span=(0.0, 1.0),
+    min_count=5,
 ) -> Profile:
     """Kramers-Moyal diffusion ``D(x)`` of a coordinate, per bin, at one explicit lag.
 
     ``D = Var(x[t + lag] - x[t]) / (2 lag dt)`` over the pairs starting in each
-    bin, drift-corrected by subtracting the mean displacement. With
-    ``window_ids`` (umbrella sampling) pairs never cross a window and the
-    per-window variances are pooled, see :func:`_km_stratified`.
+    bin, drift-corrected by subtracting the mean displacement. Pairs never
+    cross a run; with ``window_ids`` (umbrella sampling) they never cross a
+    window either and the per-window variances are pooled, see
+    :func:`_km_stratified`.
 
     ``lag`` is explicit on purpose. On a coordinate with a diffusive regime
     the estimate is flat across lags and any lag in the plateau will do; on one
@@ -171,6 +176,7 @@ def diffusion_profile(
         dt: time between consecutive frames.
         lag: displacement lag in frames (``>= 1``).
         window_ids: ``(T,)`` per-frame umbrella window labels, or None.
+        run_ids: ``(T,)`` labels of independent contiguous runs, or None.
         n_bins, span: the bins along the coordinate; ``span`` defaults to the
             committor's ``[0, 1]``.
         min_count: bins with fewer pairs than this are NaN.
@@ -181,13 +187,16 @@ def diffusion_profile(
         raise ValueError(f"lag must be a positive number of frames; got {lag}")
     if lag >= x.shape[0]:
         raise ValueError(f"lag {lag} is not shorter than the trajectory ({x.shape[0]} frames)")
-    edges = np.linspace(span[0], span[1], n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
+    wid, seg = _runs(x.shape[0], window_ids, run_ids)
+    keep = seg[:-lag] == seg[lag:]  # both ends of a pair in one run
+    edges, centers = bin_grid(n_bins, span)
     bin_idx = np.clip(np.digitize(x, edges) - 1, 0, n_bins - 1)
-    if window_ids is None:
-        D, counts = _km_lumped(x, bin_idx, lag, dt, n_bins, min_count)
+    dx = (x[lag:] - x[:-lag])[keep]
+    bins = bin_idx[:-lag][keep]
+    if wid is None:
+        D, counts = _km_lumped(dx, bins, lag, dt, n_bins, min_count)
     else:
-        D, counts = _km_stratified(x, bin_idx, window_ids, lag, dt, n_bins, min_count)
+        D, counts = _km_stratified(dx, bins, wid[:-lag][keep], lag, dt, n_bins, min_count)
     return Profile(centers, D, counts)
 
 
@@ -206,6 +215,7 @@ def lag_scan(
     dt,
     lags=(1, 2, 5, 10, 20, 50),
     window_ids=None,
+    run_ids=None,
     n_bins=200,
     span=(0.0, 1.0),
     band=(0.2, 0.8),
@@ -221,13 +231,14 @@ def lag_scan(
     no lag is right. Read ``D`` off the plateau, never off the maximum.
     """
     values, counts = [], []
-    lo, hi = float(band[0]), float(band[1])
+    lo, hi = _check_band(band)
     for L in lags:
         prof = diffusion_profile(
             coordinate,
             dt=dt,
             lag=L,
             window_ids=window_ids,
+            run_ids=run_ids,
             n_bins=n_bins,
             span=span,
             min_count=min_count,
@@ -346,13 +357,12 @@ def pooled_acf_diffusion(
     Raises ValueError when no run is long enough (16 frames) for an ACF.
     """
     x_all = np.asarray(coordinate, dtype=np.float64).reshape(-1)
+    band = None if window_band is None else _check_band(window_band)
     rhos, var, n = [], [], []
     n_windows = 0
     for mask, runs in _windows(x_all, window_ids, run_ids):
-        if window_band is not None:
-            c = float(np.mean(x_all[mask]))
-            if not (float(window_band[0]) <= c <= float(window_band[1])):
-                continue
+        if band is not None and not (band[0] <= float(np.mean(x_all[mask])) <= band[1]):
+            continue
         contributed = False
         for idx in runs:
             x = x_all[idx]

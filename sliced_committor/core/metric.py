@@ -69,6 +69,7 @@ so no norm-based check can catch it. Only the reflection test can.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -82,7 +83,6 @@ __all__ = [
     "MetricResult",
     "TorsionIncidence",
     "dihedral_and_grad",
-    "gather_quads",
     "remap_quads",
     "build_torsion_incidence",
     "sincos_pullback_metric",
@@ -125,16 +125,11 @@ def _dihedral_scalar(quad: jnp.ndarray, sign: float) -> jnp.ndarray:
     return sign * jnp.arctan2(p1, p2)
 
 
-_KERNEL_CACHE: dict[float, object] = {}
-
-
-def _dihedral_kernel(angle_sign: AngleSign):
-    """jitted ``(F, n, 4, 3) -> ((F, n), (F, n, 4, 3))`` value-and-gradient."""
-    sign = float(int(angle_sign))
-    if sign not in _KERNEL_CACHE:
-        vg = jax.value_and_grad(lambda q: _dihedral_scalar(q, sign))
-        _KERNEL_CACHE[sign] = jax.jit(jax.vmap(jax.vmap(vg)))
-    return _KERNEL_CACHE[sign]
+@functools.cache
+def _dihedral_kernel(sign: float):
+    """jitted ``(F, n, 4, 3) -> ((F, n), (F, n, 4, 3))`` value-and-gradient, per sign."""
+    vg = jax.value_and_grad(lambda q: _dihedral_scalar(q, sign))
+    return jax.jit(jax.vmap(jax.vmap(vg)))
 
 
 def dihedral_and_grad(quads, *, angle_sign: AngleSign):
@@ -161,17 +156,7 @@ def dihedral_and_grad(quads, *, angle_sign: AngleSign):
     q = jnp.asarray(quads)
     if q.ndim != 4 or q.shape[2] != 4 or q.shape[3] != 3:
         raise ValueError(f"quads must be (F, n, 4, 3); got shape {tuple(q.shape)}")
-    return _dihedral_kernel(angle_sign)(q)
-
-
-def gather_quads(xyz, quad_index) -> jnp.ndarray:
-    """``(F, A, 3)`` + ``(n, 4)`` int -> ``(F, n, 4, 3)``.
-
-    Kept separate from the gradient so callers can stream ``xyz`` over an atom
-    SUBSET (see :func:`remap_quads`): only 29/129 AIB9, 55/166 chignolin and
-    208/583 villin atoms enter any proper dihedral.
-    """
-    return jnp.asarray(xyz)[:, jnp.asarray(quad_index, dtype=jnp.int32), :]
+    return _dihedral_kernel(float(int(angle_sign)))(q)
 
 
 def remap_quads(quad_index):
@@ -338,7 +323,6 @@ def sincos_pullback_metric(
     incidence: TorsionIncidence | None = None,
     normalize: bool = True,
     settings: dict | None = None,
-    dtype=np.float64,
 ) -> MetricResult:
     """``Mbar = < S g S^T >_pi`` for ``u = [sin phi_1..n, cos phi_1..n]``.
 
@@ -370,9 +354,9 @@ def sincos_pullback_metric(
     n = inc.n
     n_atoms = int(np.max(quad_local)) + 1
     m0 = (
-        jnp.ones(n_atoms, dtype=dtype)
+        jnp.ones(n_atoms, dtype=jnp.float64)
         if atom_weights is None
-        else jnp.asarray(np.asarray(atom_weights, dtype=dtype))
+        else jnp.asarray(np.asarray(atom_weights, dtype=np.float64))
     )
     if m0.ndim != 1:
         raise ValueError(f"atom_weights must be 1-D (A_local,); got shape {tuple(m0.shape)}")
@@ -382,13 +366,13 @@ def sincos_pullback_metric(
     kernel = _make_moment_kernel(inc)
     quad_j = jnp.asarray(quad_local, dtype=jnp.int32)
 
-    acc = [np.zeros(inc.n_pairs, dtype=dtype) for _ in range(4)]
+    acc = [np.zeros(inc.n_pairs, dtype=np.float64) for _ in range(4)]
     n_frames = 0
     weight_sum = 0.0
     w_iter: Iterator | None = iter(weight_chunks) if weight_chunks is not None else None
 
     for xyz in xyz_chunks:
-        x = jnp.asarray(np.asarray(xyz, dtype=dtype))
+        x = jnp.asarray(np.asarray(xyz, dtype=np.float64))
         if x.ndim != 3 or x.shape[2] != 3:
             raise ValueError(f"each xyz chunk must be (F, A_local, 3); got {tuple(x.shape)}")
         F = int(x.shape[0])
@@ -397,14 +381,14 @@ def sincos_pullback_metric(
         if w_iter is None:
             w = jnp.ones(F, dtype=x.dtype)
         else:
-            w = jnp.asarray(np.asarray(next(w_iter), dtype=dtype)).reshape(-1)
+            w = jnp.asarray(np.asarray(next(w_iter), dtype=np.float64)).reshape(-1)
             if int(w.shape[0]) != F:
                 raise ValueError(f"weight chunk has {int(w.shape[0])} entries for {F} frames")
 
         angles, grads = dihedral_and_grad(x[:, quad_j, :], angle_sign=angle_sign)
         parts = kernel(grads, angles, w, m0)
         for t, p in enumerate(parts):
-            acc[t] += np.asarray(p, dtype=dtype)
+            acc[t] += np.asarray(p, dtype=np.float64)
         n_frames += F
         weight_sum += float(jnp.sum(w))
 
@@ -416,9 +400,9 @@ def sincos_pullback_metric(
 
     i = inc.pairs[:, 0].astype(np.int64)
     j = inc.pairs[:, 1].astype(np.int64)
-    SS = np.zeros((n, n), dtype=dtype)  # sin-sin block: <cos_i cos_j g_ij>
-    CC = np.zeros((n, n), dtype=dtype)  # cos-cos block: <sin_i sin_j g_ij>
-    SC = np.zeros((n, n), dtype=dtype)  # sin-cos block: -<cos_i sin_j g_ij>
+    SS = np.zeros((n, n), dtype=np.float64)  # sin-sin block: <cos_i cos_j g_ij>
+    CC = np.zeros((n, n), dtype=np.float64)  # cos-cos block: <sin_i sin_j g_ij>
+    SC = np.zeros((n, n), dtype=np.float64)  # sin-cos block: -<cos_i sin_j g_ij>
     SS[i, j] = m_cc
     SS[j, i] = m_cc
     CC[i, j] = m_ss
@@ -426,7 +410,7 @@ def sincos_pullback_metric(
     SC[i, j] = -m_cs
     SC[j, i] = -m_sc
 
-    M = np.empty((2 * n, 2 * n), dtype=dtype)
+    M = np.empty((2 * n, 2 * n), dtype=np.float64)
     M[:n, :n] = SS
     M[n:, n:] = CC
     M[:n, n:] = SC

@@ -89,10 +89,6 @@ class USDataset(NamedTuple):
     def n_windows(self) -> int:
         return int(self.window_centers.shape[0])
 
-    def per_window_weights(self, sample_weights: np.ndarray) -> list[np.ndarray]:
-        """List of ``(N_k,)`` per-window weight blocks parallel to features."""
-        return split_by_window(np.asarray(sample_weights).reshape(-1), self.window_ids)
-
     def subsample(self, max_frames: int, *, seed: int = 0) -> tuple[USDataset, np.ndarray]:
         """Return a frame-subsampled copy (stratified per window) and the kept index.
 

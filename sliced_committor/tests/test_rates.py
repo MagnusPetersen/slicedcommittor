@@ -30,6 +30,7 @@ from ._helpers import (
     double_well_samples,
     ou_trajectory,
     overdamped_double_well_trajectory,
+    unit_directions,
     windowed_ou,
 )
 
@@ -62,7 +63,6 @@ def test_exact_committor_flux_is_constant_and_every_reduction_agrees():
         assert out["k_BA"] == pytest.approx(nu / rho_B, rel=1e-9), reduction
         assert out["flatness"] < 1e-12
         assert out["k_AB_harmonic"] == pytest.approx(out["k_AB_arithmetic"], rel=1e-9)
-    assert np.isnan(out["nu_R"]) is False or reduction != "harmonic"
 
 
 def test_auto_plateau_and_harmonic_window_on_the_exact_committor():
@@ -201,8 +201,7 @@ def test_grad_sq_profile_and_rate_are_invariant_under_a_rotation_of_the_features
     samples, in_A, in_B = double_well_samples(n=1500, seed=3)
     rng = np.random.default_rng(5)
     R, _ = np.linalg.qr(rng.standard_normal((2, 2)))
-    theta = rng.standard_normal((32, 2))
-    theta /= np.linalg.norm(theta, axis=1, keepdims=True)
+    theta = unit_directions(2, 32, seed=5)
     kw = dict(
         in_A=jnp.asarray(in_A),
         in_B=jnp.asarray(in_B),

@@ -18,10 +18,10 @@ it); everything else takes per-sample values.
 import jax
 import jax.numpy as jnp
 import numpy as np
-from scipy.stats import rankdata
 
+from ..core.committor import _batched
 from ._coordinate import Profile
-from ._numerics import density_histogram, normalize_weights
+from ._numerics import bin_grid, density_histogram, normalize_weights, per_frame
 
 _TINY = 1e-30
 
@@ -40,11 +40,10 @@ def density(coordinate, *, sample_weights=None, n_bins=200, span=(0.0, 1.0)) -> 
         n_bins, span: the histogram; ``span`` defaults to the committor's
             ``[0, 1]``, pass ``(s.min(), s.max())`` for a collective variable.
     """
-    lo, hi = float(span[0]), float(span[1])
-    x = np.clip(np.asarray(coordinate, dtype=np.float64).reshape(-1), lo, hi)
-    edges = np.linspace(lo, hi, n_bins + 1)
+    edges, centers = bin_grid(n_bins, span)
+    x = np.clip(np.asarray(coordinate, dtype=np.float64).reshape(-1), edges[0], edges[-1])
     pi, counts = density_histogram(x, edges, sample_weights)
-    return Profile(0.5 * (edges[:-1] + edges[1:]), pi, counts)
+    return Profile(centers, pi, counts)
 
 
 def basin_populations(q_values, *, sample_weights=None, in_A=None, in_B=None):
@@ -86,6 +85,31 @@ def _grad_sq(grads, metric):
     raise ValueError(f"metric must be None, (d,) diagonal or (d, d); got ndim {M.ndim}")
 
 
+def _values_and_grad_sq(committor, samples, metric=None):
+    """``q(x_n)`` and ``grad q^T M grad q`` at every sample, one batched autodiff
+    pass; the ``(batch, d)`` gradients are reduced before the next batch."""
+    vg = jax.vmap(jax.value_and_grad(committor))
+
+    def one(points):
+        vals, grads = vg(points)
+        return vals, _grad_sq(grads, metric)
+
+    vals, g = _batched(one, jnp.asarray(samples))
+    return np.asarray(vals, dtype=np.float64), np.asarray(g, dtype=np.float64)
+
+
+def _grad_sq_profile(values, grad_sq, *, sample_weights=None, n_bins=200) -> Profile:
+    """The iso-committor mean squared gradient binned from per-sample values and ``|grad q|^2``."""
+    levels = np.clip(values, 0.0, 1.0)
+    W = normalize_weights(sample_weights, levels.shape[0])
+    edges, centers = bin_grid(n_bins)
+    bin_idx = np.clip(np.digitize(levels, edges) - 1, 0, n_bins - 1)
+    Phi = np.bincount(bin_idx, weights=W * grad_sq, minlength=n_bins) * n_bins
+    pi, counts = density_histogram(levels, edges, sample_weights)
+    values = np.where(pi > 0, Phi / np.where(pi > 0, pi, 1.0), np.nan)
+    return Profile(centers, values, counts)
+
+
 def committor_grad_sq(committor, samples, *, sample_weights=None, n_bins=200, metric=None):
     """The iso-committor mean squared gradient ``<grad q^T M grad q>_q`` on ``[0, 1]``.
 
@@ -101,16 +125,8 @@ def committor_grad_sq(committor, samples, *, sample_weights=None, n_bins=200, me
     collective-variable denominator in :func:`committor_diffusion_from_cv`: the
     map is only bias-free when both mean squared gradients live in one metric.
     """
-    vals, grads = jax.vmap(jax.value_and_grad(committor))(jnp.asarray(samples))
-    g = np.asarray(_grad_sq(grads, metric), dtype=np.float64)
-    levels = np.clip(np.asarray(vals, dtype=np.float64), 0.0, 1.0)
-    W = normalize_weights(sample_weights, levels.shape[0])
-    edges = np.linspace(0.0, 1.0, n_bins + 1)
-    bin_idx = np.clip(np.digitize(np.clip(levels, 0.0, 1.0 - 1e-12), edges) - 1, 0, n_bins - 1)
-    Phi = np.bincount(bin_idx, weights=W * g, minlength=n_bins) * n_bins
-    pi, counts = density_histogram(levels, edges, sample_weights)
-    values = np.where(pi > 0, Phi / np.where(pi > 0, pi, 1.0), np.nan)
-    return Profile(0.5 * (edges[:-1] + edges[1:]), values, counts)
+    vals, g = _values_and_grad_sq(committor, samples, metric)
+    return _grad_sq_profile(vals, g, sample_weights=sample_weights, n_bins=n_bins)
 
 
 # ---------------------------------------------------------------------------
@@ -262,10 +278,10 @@ def committor_diffusion_from_cv_reparam(
         bandwidth: kernel bandwidth in ``q`` (Silverman's rule when None).
         r2_min: the monotonicity gate, on the squared rank correlation.
     """
+    from scipy.stats import rankdata
+
     q = np.clip(np.asarray(q_values, dtype=np.float64).reshape(-1), 0.0, 1.0)
-    s = np.asarray(s_values, dtype=np.float64).reshape(-1)
-    if s.shape[0] != q.shape[0]:
-        raise ValueError(f"s_values length {s.shape[0]} != q_values length {q.shape[0]}")
+    s = per_frame("s_values", s_values, q.shape[0], np.float64)
     w = normalize_weights(sample_weights, q.shape[0])
     rho2 = _weighted_r2(rankdata(q), rankdata(s), w)
     if rho2 < r2_min:
@@ -274,8 +290,7 @@ def committor_diffusion_from_cv_reparam(
             f"< r2_min = {r2_min}); the reparametrisation D_q = D_s (dq/ds)^2 needs a "
             "monotone s(q). Use committor_diffusion_from_cv instead."
         )
-    edges = np.linspace(0.0, 1.0, n_bins + 1)
-    grid = 0.5 * (edges[:-1] + edges[1:])
+    edges, grid = bin_grid(n_bins)
     s_of_q, ds_dq = _local_linear(q, s, w, grid, bandwidth)
     if isinstance(D_s, Profile):
         lv = np.asarray(D_s.levels, dtype=np.float64)
@@ -289,5 +304,5 @@ def committor_diffusion_from_cv_reparam(
     slope_sq = ds_dq**2
     ok = np.isfinite(slope_sq) & (slope_sq > 1e-12)
     Dq = np.where(ok, Ds_at / np.maximum(slope_sq, _TINY), np.nan)
-    counts, _ = np.histogram(q, bins=edges)
+    _, counts = density_histogram(q, edges)
     return Profile(grid, Dq, counts)

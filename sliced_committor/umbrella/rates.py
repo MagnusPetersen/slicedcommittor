@@ -33,9 +33,9 @@ import numpy as np
 
 from ..core.committor import fit_committor
 from ..rates import (
+    Profile,
     basin_populations,
     committor_diffusion_from_cv,
-    committor_grad_sq,
     density,
     diffusion_profile,
     flux_flatness,
@@ -44,13 +44,14 @@ from ..rates import (
     pooled_acf_diffusion,
     rate_from_profiles,
 )
-from ..rates.baselines import pmf_kramers_rate as _kramers
+from ..rates.baselines import pmf_kramers_rate
+from ..rates.formulas import REDUCTIONS, flux_profiles
+from ..rates.quantities import _grad_sq_profile, _values_and_grad_sq
 from .dataset import USDataset
 
 logger = logging.getLogger(__name__)
 
 DIFFUSIONS = ("cvmap", "hummer_q", "km_q")
-REDUCTIONS = ("plateau", "harmonic", "arithmetic", "local")
 #: the fixed band of the label-free committor-quality score ``flux_cv``
 QUALITY_BAND = (0.2, 0.8)
 
@@ -79,7 +80,7 @@ def progress_coordinate(dataset: USDataset) -> np.ndarray:
     return s
 
 
-def pmf_kramers_rate(dataset: USDataset, sample_weights, *, run_ids=None, n_bins=120) -> dict:
+def kramers_baseline(dataset: USDataset, sample_weights, *, run_ids=None, n_bins=120) -> dict:
     """The committor-free Kramers baseline along the progress coordinate.
 
     ``F(s) = -log pi(s)`` from the reweighted density and the per-window
@@ -91,14 +92,14 @@ def pmf_kramers_rate(dataset: USDataset, sample_weights, *, run_ids=None, n_bins
     span = (float(s.min()), float(s.max()))
     pi = density(s, sample_weights=sample_weights, n_bins=n_bins, span=span)
     D = hummer_diffusion(s, dataset.window_ids, dt=float(dataset.dt), run_ids=run_ids)
-    return _kramers(pi, D)
+    return pmf_kramers_rate(pi, D)
 
 
 def _plain(rate: dict) -> dict:
-    """A rate dict without its profile, with plain Python scalars (JSON-ready)."""
+    """A rate dict without its profiles, with plain Python scalars (JSON-ready)."""
     out = {}
     for k, v in rate.items():
-        if k == "nu":
+        if isinstance(v, Profile):
             continue
         if isinstance(v, tuple):
             out[k] = tuple(float(x) for x in v)
@@ -118,9 +119,6 @@ def fit_and_rate(
     n_bins: int = 200,
     seed: int = 0,
     tikhonov="halfset_eigen",
-    direction_sampling=None,
-    directions=None,
-    feature_metric=None,
     bridge_metric=None,
     D_s: float | None = None,
     run_ids=None,
@@ -136,12 +134,14 @@ def fit_and_rate(
     Args:
         dataset: the umbrella dataset (basins, windows, ``dt``, the biased CV).
         features: ``(N, d)`` committor features, row-aligned with the dataset.
-        sample_weights: ``(N,)`` MBAR/WHAM weights (:func:`reweight`).
-        n_directions, n_bins, seed, tikhonov, direction_sampling, directions,
-            feature_metric, **solver_kwargs: forwarded to
-            :func:`sliced_committor.fit_committor`. Binning defaults to
-            ``equal_width``: quantile bins put too few bins in the sparsely
-            sampled barrier and inflate the rate (about 3x on Wolfe-Quapp).
+        sample_weights: ``(N,)`` MBAR/WHAM weights (:func:`reweight`), summing
+            to one.
+        n_directions, n_bins, seed, tikhonov, **solver_kwargs: forwarded to
+            :func:`sliced_committor.fit_committor` (``direction_sampling``,
+            ``directions``, ``feature_metric``, ``boundary_quantile``, ... ride
+            along in ``solver_kwargs``). Binning defaults to ``equal_width``:
+            quantile bins put too few bins in the sparsely sampled barrier and
+            inflate the rate (about 3x on Wolfe-Quapp).
         bridge_metric: the metric of the CV -> committor map, applied to BOTH
             mean squared gradients (:func:`sliced_committor.committor_grad_sq`
             and :func:`sliced_committor.linear_response_grad_sq`); None is
@@ -149,8 +149,9 @@ def fit_and_rate(
         D_s: a known diffusion along the progress coordinate; None measures it
             with :func:`sliced_committor.pooled_acf_diffusion` over all
             windows (call that yourself to select windows).
-        run_ids: ``(N,)`` labels of independent contiguous runs (replicates)
-            for the autocorrelation-based estimators, or None.
+        run_ids: ``(N,)`` labels of independent contiguous runs (replicates),
+            which no diffusion estimator reads across; None when every window
+            is one run.
         diffusion: which constructors of ``D_q`` to run, from
             ``("cvmap", "hummer_q", "km_q")``.
         reductions: which reductions of ``{D_q, pi}`` to report, from
@@ -158,20 +159,19 @@ def fit_and_rate(
         lag: the Kramers-Moyal lag of ``"km_q"``, in frames.
         n_diff_bins: the committor grid of the profiles and the reductions.
         strict: raise on the first failing estimator (default); False records
-            the failure under ``errors`` and carries on.
+            an estimator's ``ValueError``/``RuntimeError`` under ``errors`` and
+            carries on with the rest of the bundle (the committor fit itself
+            always raises).
 
     Returns:
         dict with ``committor`` (fit diagnostics), ``q_samples``, ``D_s``,
-        ``cv_grad_sq``, ``profiles`` (``levels``, ``pi``, ``grad_sq``, and per
-        constructor ``D_q`` and ``flux``), ``rates`` (per constructor, per
-        reduction: :func:`sliced_committor.rate_from_profiles` without its
-        profile), ``flux_cv`` (per constructor: the constancy of the flux over
-        ``QUALITY_BAND``), ``kramers`` (the baseline) and ``errors``.
+        ``cv_grad_sq``, ``profiles`` (``levels``, ``counts``, ``pi``,
+        ``grad_sq``, and per constructor ``D_q`` and ``flux``), ``rates`` (per
+        constructor, per reduction: :func:`sliced_committor.rate_from_profiles`
+        without its profiles), ``flux_cv`` (per constructor: the constancy of
+        the flux over ``QUALITY_BAND``), ``kramers`` (the baseline) and
+        ``errors``.
     """
-    import jax
-    import jax.numpy as jnp
-
-    jax.config.update("jax_enable_x64", True)
     unknown = sorted(set(diffusion) - set(DIFFUSIONS))
     if unknown:
         raise ValueError(f"unknown diffusion constructor(s) {unknown}; choose from {DIFFUSIONS}")
@@ -179,58 +179,50 @@ def fit_and_rate(
     if unknown:
         raise ValueError(f"unknown reduction(s) {unknown}; choose from {REDUCTIONS}")
 
-    feats = jnp.asarray(np.asarray(features, dtype=float))
+    X = np.asarray(features, dtype=np.float64)
     in_A = np.asarray(dataset.in_A, dtype=bool)
     in_B = np.asarray(dataset.in_B, dtype=bool)
-    if not in_A.any() or not in_B.any():
-        raise ValueError(f"empty basin(s): |A|={int(in_A.sum())}, |B|={int(in_B.sum())}")
-    sw = np.asarray(sample_weights, dtype=float)
+    sw = np.asarray(sample_weights, dtype=np.float64)
     solver: dict[str, Any] = {
         "n_bins": n_bins,
         "binning_method": "equal_width",
-        "sample_weights": jnp.asarray(sw),
+        "sample_weights": sw,
+        **solver_kwargs,
     }
-    solver.update(solver_kwargs)
-    if directions is not None:
-        solver["directions"] = jnp.asarray(directions)
-        n_directions = int(solver["directions"].shape[0])
-    if direction_sampling is not None:
-        solver["direction_sampling"] = direction_sampling
-    if feature_metric is not None:
-        solver["feature_metric"] = feature_metric
-
     q, detail = fit_committor(
-        feats,
-        in_A=jnp.asarray(in_A),
-        in_B=jnp.asarray(in_B),
+        X,
+        in_A=in_A,
+        in_B=in_B,
         n_directions=n_directions,
         seed=seed,
         tikhonov=tikhonov,
         return_details=True,
         **solver,
     )
-    qv = np.asarray(q(feats), dtype=float)
-    wid = np.asarray(dataset.window_ids)
-    dt = float(dataset.dt)
-    s = progress_coordinate(dataset)
-
     out: dict[str, Any] = {
         "committor": {
             "n_directions": int(np.asarray(detail.result.directions).shape[0]),
-            "n_features": int(feats.shape[1]),
+            "n_features": int(X.shape[1]),
             "valid_fraction": float(np.mean(np.asarray(detail.result.valid_mask))),
             "dirichlet_energy": float(detail.weights.dirichlet_energy),
             "moment_gap": float(detail.weights.moment_gap),
             "tikhonov": str(tikhonov),
         },
-        "q_samples": qv,
         "errors": {},
     }
+    del detail  # the (M, N) projected samples are not needed past this point
+
+    # one autodiff pass gives the per-sample committor AND its squared gradient
+    qv, grad_sq = _values_and_grad_sq(q, X, bridge_metric)
+    out["q_samples"] = qv
+    wid = np.asarray(dataset.window_ids)
+    dt = float(dataset.dt)
+    s = progress_coordinate(dataset)
 
     def attempt(key, fn):
         try:
             return fn()
-        except Exception as exc:
+        except (ValueError, RuntimeError) as exc:
             if strict:
                 raise
             logger.warning("%s failed: %s", key, exc)
@@ -239,11 +231,11 @@ def fit_and_rate(
 
     pi = density(qv, sample_weights=sw, n_bins=n_diff_bins)
     rho_A, rho_B = basin_populations(qv, sample_weights=sw, in_A=in_A, in_B=in_B)
-    g_q = committor_grad_sq(q, feats, sample_weights=sw, n_bins=n_diff_bins, metric=bridge_metric)
-    pi_v = np.asarray(pi.values)
+    g_q = _grad_sq_profile(qv, grad_sq, sample_weights=sw, n_bins=n_diff_bins)
     out["profiles"] = {
         "levels": np.asarray(pi.levels),
-        "pi": pi_v,
+        "counts": np.asarray(pi.counts),
+        "pi": np.asarray(pi.values),
         "grad_sq": np.asarray(g_q.values),
         "D_q": {},
         "flux": {},
@@ -267,10 +259,7 @@ def fit_and_rate(
     else:
         out["D_s"] = {"value": float(D_s), "source": "given"}
     out["cv_grad_sq"] = attempt(
-        "cv_grad_sq",
-        lambda: linear_response_grad_sq(
-            s, np.asarray(features, dtype=float), sw, metric=bridge_metric
-        ),
+        "cv_grad_sq", lambda: linear_response_grad_sq(s, X, sw, metric=bridge_metric)
     )
 
     constructors = {
@@ -278,7 +267,9 @@ def fit_and_rate(
             g_q, D_s=out["D_s"]["value"], cv_grad_sq=out["cv_grad_sq"]
         ),
         "hummer_q": lambda: hummer_diffusion(qv, wid, dt=dt, run_ids=run_ids),
-        "km_q": lambda: diffusion_profile(qv, dt=dt, lag=lag, window_ids=wid, n_bins=n_diff_bins),
+        "km_q": lambda: diffusion_profile(
+            qv, dt=dt, lag=lag, window_ids=wid, run_ids=run_ids, n_bins=n_diff_bins
+        ),
     }
     out["rates"], out["flux_cv"] = {}, {}
     for name in diffusion:
@@ -288,24 +279,18 @@ def fit_and_rate(
         D_q = attempt(name, constructors[name])
         if D_q is None:
             continue
-        by_reduction, nu = {}, None
+        nu, D_q_grid = flux_profiles(pi, D_q)
+        out["profiles"]["flux"][name] = np.asarray(nu.values)
+        out["profiles"]["D_q"][name] = np.asarray(D_q_grid.values)
+        out["flux_cv"][name] = flux_flatness(nu, QUALITY_BAND)
+        out["rates"][name] = {}
         for reduction in reductions:
             rate = attempt(
                 f"{name}/{reduction}",
                 lambda r=reduction, D=D_q: rate_from_profiles(pi, D, rho_A, rho_B, reduction=r),
             )
             if rate is not None:
-                nu = rate["nu"]
-                by_reduction[reduction] = _plain(rate)
-        if nu is None:
-            continue
-        out["rates"][name] = by_reduction
-        out["flux_cv"][name] = flux_flatness(nu, QUALITY_BAND)
-        nu_v = np.asarray(nu.values)
-        out["profiles"]["flux"][name] = nu_v
-        out["profiles"]["D_q"][name] = np.where(
-            pi_v > 0, nu_v / np.where(pi_v > 0, pi_v, 1.0), np.nan
-        )
+                out["rates"][name][reduction] = _plain(rate)
 
-    out["kramers"] = attempt("kramers", lambda: pmf_kramers_rate(dataset, sw, run_ids=run_ids))
+    out["kramers"] = attempt("kramers", lambda: kramers_baseline(dataset, sw, run_ids=run_ids))
     return out

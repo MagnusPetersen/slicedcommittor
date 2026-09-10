@@ -10,6 +10,10 @@
   time series with a known diffusion coefficient, for the rate estimators.
 * ``double_well_1d_profiles``: the analytic ``{pi(q), D_q(q)}`` of the exact
   committor of a 1D double well, whose flux is constant by construction.
+* ``umbrella_double_well_dataset``: umbrella windows on a 2D double well with a
+  known mobility, as a ``USDataset`` (``umbrella_double_well`` is its generator).
+* ``unit_directions``, ``spd_pair``, ``write_colvar``: small fixtures shared
+  by several test files.
 """
 
 import jax.numpy as jnp
@@ -280,3 +284,55 @@ def umbrella_double_well(n_windows=8, n_per=20000, *, dt=0.01, D0=0.05, kappa=15
         xs[:, t], ys[:, t] = x, y
     window_ids = np.repeat(np.arange(n_windows), n_per)
     return xs.ravel(), ys.ravel(), window_ids, centers, kappa
+
+
+def umbrella_double_well_dataset(
+    n_windows=8, n_per=20000, *, dt=0.01, D0=0.05, kappa=15.0, seed=0, basin_edge=0.9
+):
+    """:func:`umbrella_double_well` wrapped as a ``USDataset`` with basins ``|x| > basin_edge``."""
+    from sliced_committor.umbrella import USDataset
+
+    x, y, wid, centers, kappa = umbrella_double_well(
+        n_windows, n_per, dt=dt, D0=D0, kappa=kappa, seed=seed
+    )
+    return USDataset(
+        features=np.stack([x, y], axis=1),
+        cvs=x[:, None],
+        window_ids=wid,
+        window_centers=centers[:, None],
+        window_kappa=np.full((centers.size, 1), kappa),
+        beta=1.0,
+        dt=dt,
+        in_A=x < -basin_edge,
+        in_B=x > basin_edge,
+        cv_periodic=(None,),
+        meta={},
+    )
+
+
+def unit_directions(dim, m, seed=11):
+    """``(m, dim)`` random unit vectors (numpy RNG, so independent of the solver's draw)."""
+    rng = np.random.default_rng(seed)
+    raw = rng.standard_normal((m, dim))
+    return jnp.asarray(raw / np.linalg.norm(raw, axis=1, keepdims=True))
+
+
+def spd_pair(M, seed):
+    """Two noisy SPD matrices sharing a base: a half-Gram pair for the filter tests."""
+    rng = np.random.default_rng(seed)
+    B = rng.standard_normal((M, M))
+    base = B @ B.T / M
+    E1, E2 = rng.standard_normal((M, M)), rng.standard_normal((M, M))
+    return base + 0.05 * (E1 @ E1.T) / M, base + 0.05 * (E2 @ E2.T) / M
+
+
+def write_colvar(path, time, columns, fields, periodic=None):
+    """Write a minimal PLUMED COLVAR file; ``columns`` maps field name -> array."""
+    lines = [f"#! FIELDS {' '.join(fields)}"]
+    for name, (lo, hi) in (periodic or {}).items():
+        lines.append(f"#! SET min_{name} {lo}")
+        lines.append(f"#! SET max_{name} {hi}")
+    data = np.column_stack([time] + [columns[f] for f in fields if f != "time"])
+    body = "\n".join(" ".join(f"{v:.6f}" for v in row) for row in data)
+    path.write_text("\n".join(lines) + "\n" + body + "\n")
+    return path

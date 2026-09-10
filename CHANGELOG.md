@@ -36,12 +36,15 @@ published; their history is kept below and their code at tag `v0.6.0`.
   batch; the committor callable is a pure function of `x`.
 - `compute_sliced_committor` has 14 keyword arguments (from 17):
   `store_projected_samples`, `quantile_subsample` and `absorption_quantile`
-  are gone, `binning_method` is validated, `rd_kappa` is `1e12` in one place,
-  and `valid_mask` now means that the 1D solve is finite.
+  are gone, `binning_method` is validated, `sample_weights` must sum to one
+  (the solve uses them verbatim, so the Dirichlet energies of fits are
+  comparable), `rd_kappa` is `1e12` in one place, and `valid_mask` now means
+  that the 1D solve is finite.
 - Directions: `DirectionSamplingConfig(mode="uniform" | "lda", lda_shrinkage,
-  mu, alpha, axis)`; `compute_lda_axis`, `sample_power_spherical_mixture` and
-  `directions_uniform` are public so that the cone can be built outside the
-  solve at large `M`.
+  mu, alpha, axis)`; `compute_lda_axis`, `sample_power_spherical_mixture(key,
+  axis, n_directions, dim, mu=, alpha=)` (one axis) and `directions_uniform`
+  are public so that the axis can be inspected or replaced and the draw
+  reproduced outside the solve.
 - The feature-space metric `sincos_pullback_metric` and `AngleSign` are
   exported; `AngleSign` is required.
 - `scipy>=1.10` is a hard dependency (the half-set path used it undeclared).
@@ -56,7 +59,8 @@ published; their history is kept below and their code at tag `v0.6.0`.
   `basin_populations` read the static ensemble; `diffusion_profile` (at an
   explicit `lag`), `lag_scan`, `hummer_diffusion` and `pooled_acf_diffusion`
   (the paper's estimator, promoted from the reproduction package with
-  `run_ids` and `window_band`) measure the diffusion on a trajectory;
+  `run_ids` and `window_band`) measure the diffusion on a trajectory (no
+  estimator reads across a run join, `diffusion_profile` included);
   `committor_diffusion_from_cv` is the Jacobian map from a collective
   variable, with `linear_response_grad_sq` for the CV's gradient and
   `committor_diffusion_from_cv_reparam` (gated by the squared Spearman rank
@@ -82,11 +86,15 @@ published; their history is kept below and their code at tag `v0.6.0`.
   `wham_weights`, the reading helpers `read_colvar`, `parse_restraint`,
   `load_trajectory` and `align_colvar_traj` in `io`, `mdtraj_metric`, and
   `fit_and_rate(dataset, features, sample_weights, *, n_directions=, n_bins=,
-  seed=, tikhonov=, direction_sampling=, directions=, feature_metric=,
-  bridge_metric=, D_s=, run_ids=, diffusion=("cvmap",), reductions=,
-  lag=, n_diff_bins=, strict=True, **solver_kwargs)` returning one bundle
-  (`committor`, `q_samples`, `D_s`, `cv_grad_sq`, `profiles`, `rates`,
-  `flux_cv`, `kramers`, `errors`). The extra is `[umbrella]` (mdtraj, pymbar).
+  seed=, tikhonov=, bridge_metric=, D_s=, run_ids=, diffusion=("cvmap",),
+  reductions=, lag=, n_diff_bins=, strict=True, **solver_kwargs)` (the solver
+  settings, `direction_sampling`, `directions` and `feature_metric` among
+  them, ride in `solver_kwargs`) returning one bundle (`committor`,
+  `q_samples`, `D_s`, `cv_grad_sq`, `profiles`, `rates`, `flux_cv`,
+  `kramers`, `errors`), with `kramers_baseline(dataset, weights)` as the
+  baseline on its own. `fit_and_rate` no longer switches `jax_enable_x64` on
+  in the caller's process (the solve raises when it is off). The extra is
+  `[umbrella]` (mdtraj, pymbar).
 
 ### Removed
 
@@ -138,7 +146,7 @@ evidence for each item.
 | `reactive_flux(q, X, D=D)` | `committor_rate(...)["nu"]` |
 | `_cv_feature_grad_sq`, `hummer_pooled_acf` (reproduction package) | `linear_response_grad_sq`, `pooled_acf_diffusion` |
 | `workflows.{_containers, reweight, colvar, bias, trajectory, metric_inputs, committor_rates, pmf_kramers, _units}` | `umbrella.{dataset, reweight, io, io, io, mdtraj_metric, rates, rates}`, `rates.units` |
-| `fit_and_rate(direction_mode=, weight_solver=, diffusion_mode=, has_dynamics=, committor_sweep_grid=, solver_kwargs=, weight_kwargs=)` | `fit_and_rate(direction_sampling=, tikhonov=, diffusion=, D_s=, **solver_kwargs)` |
+| `fit_and_rate(direction_mode=, weight_solver=, diffusion_mode=, has_dynamics=, committor_sweep_grid=, solver_kwargs=, weight_kwargs=)` | `fit_and_rate(tikhonov=, diffusion=, D_s=, direction_sampling=, **solver_kwargs)` |
 
 ## Pre-release history (never published)
 

@@ -111,7 +111,7 @@ print("wrote", OUT_EBMC, "keys:", len(out))
 # 2. halfset_eigen_regularize reference (numpy prototype) on random SPD pairs
 #    -- the five cases of recovar/tests/test_port_regression.py
 # --------------------------------------------------------------------------- #
-def _spd_pair(M, seed):
+def _spd_pair(M, seed):  # == tests/_helpers.spd_pair, kept verbatim: it made the reference
     rng = np.random.default_rng(seed)
     B = rng.standard_normal((M, M))
     base = B @ B.T / M

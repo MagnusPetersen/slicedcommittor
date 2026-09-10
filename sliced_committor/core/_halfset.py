@@ -26,7 +26,6 @@ regularisation of :func:`sliced_committor.solve_weights`
 import jax.numpy as jnp
 import numpy as np
 
-from ._moments import interpolate_masked
 from .gram import _assemble_gram_matrix
 
 N_FOLDS = 10
@@ -40,9 +39,7 @@ def make_folds(N: int, n_folds: int, *, strata=None):
     anti-leakage property of contiguous blocks survives the stratification,
     and every fold is guaranteed samples of every basin.
     """
-    if strata is None:
-        return (np.arange(N) * n_folds) // N
-    strata = np.asarray(strata)
+    strata = np.zeros(N, np.int64) if strata is None else np.asarray(strata)
     out = np.empty(N, np.int64)
     for s in np.unique(strata):
         idx = np.flatnonzero(strata == s)
@@ -61,8 +58,8 @@ def fold_gram_blocks(F, W, cos_matrix, fold_of, n_folds):
     """Per-fold Gram blocks ``G_k`` and their weight sums, at the cost of ONE assembly.
 
     Each block is normalised by its own weight sum, so any train/test
-    combination is a weighted mean of blocks. The folds partition the samples,
-    so the total cost stays ``O(M^2 N)``.
+    combination is a weighted mean of blocks (:func:`pool_folds`). The folds
+    partition the samples, so the total cost stays ``O(M^2 N)``.
     """
     fold_of = np.asarray(fold_of)
     G_folds, w_folds = [], []
@@ -70,9 +67,8 @@ def fold_gram_blocks(F, W, cos_matrix, fold_of, n_folds):
         idx = np.flatnonzero(fold_of == k)
         if idx.size == 0:
             raise ValueError(f"fold_gram_blocks: fold {k} is empty.")
-        lo, hi = int(idx[0]), int(idx[-1]) + 1
-        Fk = F[:, lo:hi] if hi - lo == idx.size else F[:, jnp.asarray(idx)]
-        Wk = W[lo:hi] if hi - lo == idx.size else W[jnp.asarray(idx)]
+        Fk = F[:, jnp.asarray(idx)]
+        Wk = W[jnp.asarray(idx)]
         tot = float(jnp.sum(Wk))
         if tot <= 0:
             raise ValueError(f"fold_gram_blocks: fold {k} carries zero weight.")
@@ -82,39 +78,13 @@ def fold_gram_blocks(F, W, cos_matrix, fold_of, n_folds):
     return np.stack(G_folds), np.asarray(w_folds, np.float64)
 
 
-def fold_basin_moments(result, fold_of, n_folds, batch_size: int = 512):
-    """Per-fold basin moments ``(a_folds, b_folds, wA_folds, wB_folds)``.
-
-    Unweighted counts, matching :func:`~sliced_committor.core._moments.compute_basin_moments`.
-    The interpolation is done once per direction batch and reused for every
-    fold; the reductions are bitwise the same as the single-fold ones.
-    """
-    in_A = np.asarray(result.in_A, bool)
-    in_B = np.asarray(result.in_B, bool)
-    M = result.projected_samples.shape[0]
-    fold_of = np.asarray(fold_of)
-    in_A_j, in_B_j = jnp.asarray(in_A), jnp.asarray(in_B)
-    fold_j = [jnp.asarray(fold_of == k) for k in range(n_folds)]
-    wA = np.array([float((in_A & (fold_of == k)).sum()) for k in range(n_folds)])
-    wB = np.array([float((in_B & (fold_of == k)).sum()) for k in range(n_folds)])
-    if (wA <= 0).any() or (wB <= 0).any():
-        raise ValueError(
-            "fold_basin_moments: some fold contains no samples of a basin; reduce n_folds."
-        )
-    a = np.zeros((n_folds, M))
-    b = np.zeros((n_folds, M))
-    for start in range(0, M, batch_size):
-        end = min(start + batch_size, M)
-        s_grid = result.slice_coords[start:end]
-        q_grid = result.committors_1d[start:end]
-        ps = result.projected_samples[start:end]
-        qA = interpolate_masked(s_grid, q_grid, ps, in_A_j)
-        qB = interpolate_masked(s_grid, q_grid, ps, in_B_j)
-        for k in range(n_folds):
-            a[k, start:end] = np.asarray(jnp.sum(jnp.where(fold_j[k], qA, 0.0), axis=1)) / wA[k]
-            b[k, start:end] = np.asarray(jnp.sum(jnp.where(fold_j[k], qB, 0.0), axis=1)) / wB[k]
-        del qA, qB
-    return a, b, wA, wB
+def pool_folds(G_folds, w_folds, folds):
+    """The weight-weighted mean of the selected fold blocks: the Gram of those frames."""
+    G_folds = np.asarray(G_folds, np.float64)
+    w_folds = np.asarray(w_folds, np.float64)
+    return np.tensordot(w_folds[folds], G_folds[folds], axes=(0, 0)) / max(
+        w_folds[folds].sum(), 1e-300
+    )
 
 
 def halfset_grams(G_folds, w_folds, folds=None):
@@ -125,15 +95,10 @@ def halfset_grams(G_folds, w_folds, folds=None):
     stratum: on shuffled frames the two halves are not independent and the
     measured SSNR is optimistic.
     """
-    G_folds = np.asarray(G_folds, np.float64)
-    w_folds = np.asarray(w_folds, np.float64)
-    folds = np.arange(G_folds.shape[0]) if folds is None else np.asarray(folds)
+    folds = np.arange(np.asarray(G_folds).shape[0]) if folds is None else np.asarray(folds)
     if folds.size < 2:
         raise ValueError("halfset_grams: at least two folds are needed to form two halves.")
-    even, odd = folds[0::2], folds[1::2]
-    G1 = np.tensordot(w_folds[even], G_folds[even], axes=(0, 0)) / max(w_folds[even].sum(), 1e-300)
-    G2 = np.tensordot(w_folds[odd], G_folds[odd], axes=(0, 0)) / max(w_folds[odd].sum(), 1e-300)
-    return G1, G2
+    return pool_folds(G_folds, w_folds, folds[0::2]), pool_folds(G_folds, w_folds, folds[1::2])
 
 
 def _ssnr_from_corr(c):

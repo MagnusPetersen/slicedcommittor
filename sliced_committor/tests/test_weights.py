@@ -159,13 +159,18 @@ def _paired(alt, base):
     return float(np.mean(d)), float(np.mean(d) / se), int((d > 0).sum()), d.size
 
 
+@pytest.fixture(scope="module")
+def reference_cap():
+    return sc.solve_weights(_wq(n=20000), heldout_cap=True).heldout_cap
+
+
 @pytest.mark.parametrize(
     "label,kw", [("fewer_directions", {"m": 4}), ("coarser_histograms", {"n_bins": 4})]
 )
-def test_cap_ranks_a_degraded_trial_space_worse(label, kw):
+def test_cap_ranks_a_degraded_trial_space_worse(label, kw, reference_cap):
     """The property the paper's (mu, alpha) selection rests on: shrinking or
     blunting the trial space raises the held-out cap. Paired across folds."""
-    base = sc.solve_weights(_wq(n=20000), heldout_cap=True).heldout_cap
+    base = reference_cap
     alt = sc.solve_weights(_wq(n=20000, **kw), heldout_cap=True).heldout_cap
     mean_d, t, n_pos, n = _paired(alt, base)
     assert mean_d > 0, f"{label}: the cap fell for a worse trial space"
@@ -179,7 +184,6 @@ def test_cap_ranks_a_degraded_trial_space_worse(label, kw):
 def test_bootstrap_shapes_and_determinism():
     res = _wq(n=3000, m=16, seed=1, binning="quantile")
     w = sc.solve_weights(res)
-    pts = jnp.asarray(np.asarray(res.projected_samples)[:0]).reshape(0, 2)
     b1 = sc.bootstrap_weights(
         res, w, n_boot=6, block_len=25, seed=3, points=jnp.asarray(wolfe_quapp_samples(5, 9)[0])
     )
@@ -190,15 +194,17 @@ def test_bootstrap_shapes_and_determinism():
     assert b1.w.shape == (6, 16) and b1.c.shape == (6,) and b1.q.shape == (6, 5)
     np.testing.assert_array_equal(b1.w, b2.w)
     assert b1.moment_gap.std() > 0
-    del pts
 
 
 def test_bootstrap_blocks_never_cross_runs():
-    from sliced_committor.core._ebmc import _run_segments
+    from sliced_committor._runs import segment_ids, segments
 
     runs = np.array([0, 0, 0, 1, 1, 2, 2, 2, 2])
-    assert _run_segments(runs) == [(0, 3), (3, 5), (5, 9)]
-    assert _run_segments(np.zeros(4, int)) == [(0, 4)]
+    assert segments(runs) == [(0, 3), (3, 5), (5, 9)]
+    assert segments(np.zeros(4, int)) == [(0, 4)]
+    # a label that recurs starts a NEW run, and a second label splits runs further
+    np.testing.assert_array_equal(segment_ids(np.array([0, 0, 1, 0])), [0, 0, 1, 2])
+    assert segments(np.array([0, 0, 0, 0]), np.array([1, 1, 2, 2])) == [(0, 2), (2, 4)]
 
 
 def test_bootstrap_spread_tracks_the_seed_to_seed_spread():

@@ -10,6 +10,8 @@ i.e. exactly the derivative of the function :func:`sliced_committor.build_commit
 evaluates.
 """
 
+import warnings
+
 import jax.numpy as jnp
 from jax import jit, vmap
 
@@ -23,7 +25,7 @@ def _compute_derivative_matrix(slice_coords, committors_1d, projected_samples):
     n_bins = slice_coords.shape[1]
 
     def _find_bins(s_grid, s_proj):
-        idx = jnp.searchsorted(s_grid, s_proj, side="right") - 1
+        idx = jnp.searchsorted(s_grid, s_proj, side="right", method="scan_unrolled") - 1
         return jnp.clip(idx, 0, n_bins - 2)
 
     bin_indices = vmap(_find_bins)(slice_coords, projected_samples)
@@ -43,7 +45,11 @@ def _assemble_gram_matrix(F, W, cos_matrix):
 # ---------------------------------------------------------------------------
 
 
-def validate_feature_metric(feature_metric, dim, *, cond_warn=1e4, psd_rtol=1e-10):
+_PSD_RTOL = 1e-10  # eigenvalues below -rtol * lam_max are not rounding
+_COND_WARN = 1e4
+
+
+def validate_feature_metric(feature_metric, dim):
     """Symmetrise, PSD-project and range-check a ``(dim, dim)`` metric; None passes through."""
     if feature_metric is None:
         return None
@@ -69,7 +75,7 @@ def validate_feature_metric(feature_metric, dim, *, cond_warn=1e4, psd_rtol=1e-1
     M = 0.5 * (M + M.T)
     lam = jnp.linalg.eigvalsh(M)
     lam_min, lam_max = float(lam[0]), float(lam[-1])
-    if lam_min < -psd_rtol * max(lam_max, 1.0):
+    if lam_min < -_PSD_RTOL * max(lam_max, 1.0):
         raise ValueError(
             f"feature_metric is not positive semi-definite (min eigenvalue {lam_min:.3e} "
             f"vs max {lam_max:.3e}). A diffusion tensor must be PSD."
@@ -77,11 +83,9 @@ def validate_feature_metric(feature_metric, dim, *, cond_warn=1e4, psd_rtol=1e-1
     if lam_max <= 0.0:
         raise ValueError("feature_metric has no positive eigenvalue.")
     cond = lam_max / lam_min if lam_min > 0 else float("inf")
-    if cond > float(cond_warn):
-        import warnings
-
+    if cond > _COND_WARN:
         warnings.warn(
-            f"feature_metric is ill-conditioned (cond = {cond:.3e} > {float(cond_warn):.1e}); "
+            f"feature_metric is ill-conditioned (cond = {cond:.3e} > {_COND_WARN:.1e}); "
             "diag(G) then spans that range. The half-set filter (the default tikhonov) "
             "regularises band by band and copes; a scalar ridge does not.",
             UserWarning,

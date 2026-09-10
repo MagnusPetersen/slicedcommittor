@@ -160,21 +160,24 @@ def test_result_shapes_and_summary():
 
 
 def test_sample_weights_reweight_the_boundary_error():
-    """Uniform weights reproduce the unweighted path exactly; non-uniform ones move it."""
+    """Uniform weights reproduce the unweighted path exactly; non-uniform ones move it;
+    weights that do not sum to one are refused (the solve uses them verbatim)."""
     s, in_A, in_B = two_basin_samples(500, dim=2, seed=3)
     N = s.shape[0]
     base = sc.compute_sliced_committor(s, in_A=in_A, in_B=in_B, n_directions=16, seed=1)
     unif = sc.compute_sliced_committor(
-        s, in_A=in_A, in_B=in_B, n_directions=16, seed=1, sample_weights=jnp.ones(N)
+        s, in_A=in_A, in_B=in_B, n_directions=16, seed=1, sample_weights=jnp.ones(N) / N
     )
     np.testing.assert_allclose(
         np.asarray(unif.boundary_errors), np.asarray(base.boundary_errors), rtol=1e-6
     )
-    w = jnp.asarray(np.random.default_rng(0).uniform(0.1, 1.0, N))
+    w = np.random.default_rng(0).uniform(0.1, 1.0, N)
     skew = sc.compute_sliced_committor(
-        s, in_A=in_A, in_B=in_B, n_directions=16, seed=1, sample_weights=w
+        s, in_A=in_A, in_B=in_B, n_directions=16, seed=1, sample_weights=w / w.sum()
     )
     assert not np.allclose(np.asarray(skew.boundary_errors), np.asarray(base.boundary_errors))
+    with pytest.raises(ValueError, match="sum to one"):
+        sc.compute_sliced_committor(s, in_A=in_A, in_B=in_B, n_directions=16, sample_weights=w)
 
 
 # --------------------------------------------------------------------------- #

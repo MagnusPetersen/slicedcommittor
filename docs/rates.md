@@ -60,7 +60,9 @@ D_s, tau_int, ci = pooled.D, pooled.tau_int, pooled.ci
 ```
 
 `run_ids` mark independent contiguous runs (replicates): an autocorrelation
-is only defined within one, and splicing runs inflates `tau_int`.
+is only defined within one, and splicing runs inflates `tau_int`. The
+Kramers-Moyal estimator takes the same `run_ids=` and never pairs frames
+across a join.
 
 ### Mapped from a collective variable: the Jacobian route
 

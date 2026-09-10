@@ -58,7 +58,5 @@ walkthrough.
 
 .. automodule:: sliced_committor.rates.units
    :members:
-      estimated_to_per_s,
-      reference_to_per_s,
-      is_reduced
+      estimated_to_per_s
 ```

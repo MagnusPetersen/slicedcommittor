@@ -16,9 +16,9 @@ result = compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=12
 
 `mu` is the mean cosine to the axis (0 is uniform), `alpha` the fraction of
 uniform directions, and the paper selects `(mu, alpha)` per system by the
-held-out cap. At large `M` build the cone outside the solver and pass it as
-`directions=`: folding the sampler into the jitted solve blows JAX's
-constant budget.
+held-out cap. The pieces are public, so the axis can be inspected or
+replaced by a coordinate of your own and the draw reproduced outside the
+solver and passed back as `directions=`:
 
 ```python
 import jax
@@ -27,9 +27,9 @@ from sliced_committor import compute_lda_axis, sample_power_spherical_mixture
 
 axis, _ = compute_lda_axis(samples, in_A, in_B, shrinkage=1e-2)  # (unit vector, diagnostics)
 directions = sample_power_spherical_mixture(
-    jax.random.PRNGKey(0), axis[None, :], 128, samples.shape[1], mu=0.5, alpha=0.2
+    jax.random.PRNGKey(0), axis, 128, samples.shape[1], mu=0.5, alpha=0.2
 )
-result = compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=128, directions=directions)
+result = compute_sliced_committor(samples, in_A=in_A, in_B=in_B, directions=directions)
 ```
 
 ## The feature-space metric
@@ -84,7 +84,9 @@ the extreme projected basin sample toward the centroid, for high-dimensional
 features whose basin shadows inflate ([theory.md](theory.md)). The solver
 holds an `(M, N)` array of projected samples: `direction_batch_size` bounds
 the transient memory of the slice construction, and quantile binning
-subsamples the projections above 20,000 frames to find its bin edges.
+subsamples the projections above 20,000 frames to find its bin edges. The
+committor callable and the rate quantities evaluate in batches of points on
+their own, so a large evaluation costs no more memory than the fit.
 
 ```python
 result = compute_sliced_committor(
