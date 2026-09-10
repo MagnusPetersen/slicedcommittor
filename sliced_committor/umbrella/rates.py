@@ -136,10 +136,11 @@ def fit_and_rate(
         features: ``(N, d)`` committor features, row-aligned with the dataset.
         sample_weights: ``(N,)`` MBAR/WHAM weights (:func:`reweight`), summing
             to one.
-        n_directions, n_bins, seed, tikhonov, **solver_kwargs: forwarded to
+        n_directions, n_bins, seed, tikhonov, solver_kwargs: forwarded to
             :func:`sliced_committor.fit_committor` (``direction_sampling``,
             ``directions``, ``feature_metric``, ``boundary_quantile``, ... ride
-            along in ``solver_kwargs``). Binning defaults to ``equal_width``:
+            along as the remaining keyword arguments, ``solver_kwargs``).
+            Binning defaults to ``equal_width``:
             quantile bins put too few bins in the sparsely sampled barrier and
             inflate the rate (about 3x on Wolfe-Quapp).
         bridge_metric: the metric of the CV -> committor map, applied to BOTH

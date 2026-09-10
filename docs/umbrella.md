@@ -71,12 +71,12 @@ every diffusion constructor asked for and reduces it every way asked for:
   diagnostic (the restraint confines `s`, not `q`).
 * `"km_q"`: the Kramers-Moyal estimate on the committor at `lag`, which
   needs a diffusive regime the committor of a slow system lacks.
+* `reductions=("plateau", "harmonic", "arithmetic")` by default, `"local"`
+  on request.
 
 `run_ids=` marks independent replicates; no estimator reads a displacement
 or an autocorrelation across a join. Like every fit, `fit_and_rate` needs
-`jax_enable_x64` to be on in your process; it does not switch it on for you.
-* `reductions=("plateau", "harmonic", "arithmetic")` by default, `"local"`
-  on request.
+`jax_enable_x64` on in the calling process.
 
 The bundle carries the fit diagnostics (`committor`), the per-sample
 committor (`q_samples`), the profiles on the `n_diff_bins` grid

@@ -15,7 +15,8 @@ published; their history is kept below and their code at tag `v0.6.0`.
 ### The committor
 
 - One weight solver, `solve_weights(result, *, tikhonov="halfset_eigen",
-  heldout_cap=False, raise_on_degenerate=True)`, returning a typed `Weights`
+  heldout_cap=False, raise_on_degenerate=True, counts=None)`, returning a
+  typed `Weights`
   (`w`, `c`, `dirichlet_energy`, `moment_gap`, `cond`, `ridge`, `tikhonov`,
   `heldout_cap`, `diagnostics`). `build_committor(result, weights, clip=True)`
   returns the callable `q(x, in_A=None, in_B=None)`; `fit_committor(samples,
@@ -30,11 +31,16 @@ published; their history is kept below and their code at tag `v0.6.0`.
   research package together with the contiguous folds and the block
   bootstrap.
 - `bootstrap_weights(result, weights, *, n_boot=40, block_len, run_ids=None,
-  seed=0, points=None)` block-bootstraps the weights with the basis fixed and
-  returns a `Bootstrap`.
+  seed=0, points=None, min_basin_frames=5)` block-bootstraps the weights with
+  the basis fixed, skips a replicate that leaves fewer than
+  `min_basin_frames` frames in a basin, and returns a `Bootstrap` (`n_ok`
+  counts the replicates kept).
 - `rescale_transition(q_values, in_A, in_B)` is a function of an evaluated
   batch; the committor callable is a pure function of `x`.
-- `compute_sliced_committor` has 14 keyword arguments (from 17):
+- `compute_sliced_committor` takes `n_directions`, `n_bins`, `seed`,
+  `binning_method`, `density_floor`, `n_min`, `rd_kappa`,
+  `boundary_quantile`, `direction_batch_size`, `sample_weights`,
+  `directions`, `direction_sampling` and `feature_metric`;
   `store_projected_samples`, `quantile_subsample` and `absorption_quantile`
   are gone, `binning_method` is validated, `sample_weights` must sum to one
   (the solve uses them verbatim, so the Dirichlet energies of fits are
@@ -69,10 +75,11 @@ published; their history is kept below and their code at tag `v0.6.0`.
 - `rate_from_profiles(pi, D_q, rho_A, rho_B, *, reduction="plateau", band=,
   q_star=, window=)` unifies the reductions (plateau, arithmetic, harmonic,
   local); each accepts only its own parameter. Every result carries the
-  arithmetic and harmonic values, the flux profile `nu` and `flatness`;
-  `flux_flatness` is the paper's `flux_cv` on a fixed band.
-- `committor_rate(q, samples, *, D_q= | trajectory=, dt=, lag=, ...)`: the
-  two routes are mutually exclusive.
+  arithmetic and harmonic values, the profiles `nu` and `D_q` on the
+  density's grid, and `flatness`; `flux_flatness` is the paper's `flux_cv`
+  on a fixed band.
+- `committor_rate(q, samples, *, D_q= | trajectory=, dt=, lag=, window_ids=,
+  run_ids=, ...)`: the two routes are mutually exclusive.
 - The MFPT quadrature uses midpoint cumulative masses, so the discrete
   identity `int M_A dq = rho_A` is exact and every reduction returns the same
   rate to rounding on an exact committor.

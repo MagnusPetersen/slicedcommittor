@@ -27,7 +27,7 @@ separate, named step; silent fallbacks are errors.
 |---|---|
 | `tikhonov="cv"`, `"cv_refit"` (the held-out cap as the ridge selector) | the weakest rule on every system tested; costs 14 percentage points where it bites and gains nothing |
 | `tikhonov="auto_lambda"` (`1.8e-4 (1e5 / N_eff) M geomean(diag G)`) | the M-scaling is derived but the constant is fitted, with per-system optima spanning 8x |
-| `tikhonov=("lambda", v)`, `("ridge_abs", r)`, relative floats, `"auto_m"` | spellings of one number; a float is now the absolute ridge |
+| `tikhonov=("lambda", v)`, `("ridge_abs", r)`, relative floats, `"auto_m"` | spellings of one number; the absolute ridge is a float in the units of `G` |
 
 The half-set spectral filter has no constant and nothing to select, and
 regularises band by band, which a scalar cannot; the held-out cap survives
@@ -56,7 +56,7 @@ LDA cone.
 | MBAR weights inside IDS | refuted with IDS |
 | `absorption_quantile` decoupled from `boundary_quantile` | never decoupled in any published run |
 | `quantile_subsample`, `store_projected_samples`, `gram_dtype` | one legal value each: the internal rule, always stored, float64 |
-| overlap detection in `valid_mask` | never implemented; the moment gap zeroes such slices on its own. `valid_mask` now means the 1D solve is finite |
+| overlap detection in `valid_mask` | never implemented; the moment gap zeroes such slices on its own. `valid_mask` marks the slices whose 1D solve is finite |
 
 What the RECOVAR program did transfer is in `core/_halfset.py`: the half-set
 spectral filter, contiguous basin-stratified folds, the held-out cap with its
@@ -73,8 +73,8 @@ error bar was not ported: 13x too small on molecular data.
 | `reactive_flux` | the product of two survivors; the flux profile is returned by every rate |
 | the lag scan's argmax as the default lag | upward-biased, and on a coordinate without a diffusive plateau it returns the short-time bounce; `lag` is explicit and `lag_scan` shows the plateau |
 | per-window Kramers-Moyal | the window-stratified estimator and Hummer cover it |
-| the barrier-band median of per-window Hummer values as `D_s` | the pooled-autocorrelation estimator removes the per-window `tau_int` noise it was averaging over; the paper's figure and rate table now use one `D_s` |
-| the `at=` selector (`None` / scalar / range / `"auto"`) | one overloaded argument with three type errors and one silent wrong answer; each reduction now has its own named parameter |
+| the barrier-band median of per-window Hummer values as `D_s` | the pooled-autocorrelation estimator removes the per-window `tau_int` noise it was averaging over; the paper's figure and rate table use one `D_s` |
+| the `at=` selector (`None` / scalar / range / `"auto"`) | one overloaded argument with three type errors and one silent wrong answer; each reduction has its own named parameter |
 | `flux_reductions`, `mapped_committor_diffusion_field`, `smooth_Ds_profile`, `constancy_reconstruction`, `bootstrap_barrier_Ds` | the bridge-v2 research module; the field bridge reduces to the scalar map when `D_s` is constant, and chignolin turned out committor-quality-limited, not `D`-limited |
 | Bayesian Smoluchowski `(F, D)` inference | recovers the local short-lag diffusion, which is not the memory-integrated quantity the rate needs |
 | `hist`, `kernel` and `pspline` conditional means | only the local-linear regression survived, inside the reparametrisation route |

@@ -29,16 +29,18 @@ regularisation and therefore the weights.
 `tests/golden/` holds the references the release is gated on: the slice
 basis, the weights under both ridge rules, the half-set regularised Gram
 matrices and the held-out cap on a two-basin fixture and on the paper's
-Wolfe-Quapp benchmark, frozen from version 0.6.0 by
-`freeze_1_0_references.py` (kept for provenance; it cannot run against 1.0).
-The half-set weights reproduce them to the bit; the scalar-ridge weights to
+Wolfe-Quapp benchmark. The script that produced them,
+`freeze_1_0_references.py`, sits beside them as their provenance. The
+half-set weights reproduce them to the bit; the scalar-ridge weights to
 `1e-13`.
 
 ## The paper
 
 The paper's figures and rate table are reproduced by the Zenodo record's
 self-contained package, which vendors this library and checks every number
-against its reference outputs (209 checks at `2e-3` relative). Pin the
+against its reference outputs (`2e-3` relative on the scalars, `5e-3`
+absolute on the arrays, and the headline RMSE values to the last digit the
+paper prints). Pin the
 library version in a downstream regression suite:
 
 ```toml

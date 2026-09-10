@@ -59,7 +59,7 @@ and the solved `Weights`, whose `dirichlet_energy` is the variational
 objective of the fit: lower is closer to the true committor, and no reference
 is needed to compare fits of the same data.
 
-The defaults are the paper's settings. What the paper changed per system:
+The defaults are the paper's settings. The paper's per-system values:
 
 | setting | default | the paper |
 |---|---|---|

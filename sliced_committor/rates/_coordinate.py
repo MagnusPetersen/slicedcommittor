@@ -85,13 +85,15 @@ def _check_band(band):
 class PlateauWindow(NamedTuple):
     """The band located by :func:`find_plateau`.
 
-    lo, hi:    window bounds along the committor coordinate.
-    flatness:  ``sigma/|mu|`` of the flux over the window's valid bins.
-    value:     median flux over the window.
-    n_valid:   number of valid bins inside the window.
-    ok:        whether the window met the flatness tolerance. ``False`` means the
-               global minimum-flatness window was returned instead; treat the
-               rate read on it as indicative, not converged.
+    Attributes:
+        lo: lower window bound along the committor coordinate.
+        hi: upper window bound.
+        flatness: ``sigma/|mu|`` of the flux over the window's valid bins.
+        value: median flux over the window.
+        n_valid: number of valid bins inside the window.
+        ok: whether the window met the flatness tolerance. ``False`` means
+            the global minimum-flatness window was returned instead; treat
+            the rate read on it as indicative, not converged.
     """
 
     lo: float

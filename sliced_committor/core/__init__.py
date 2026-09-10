@@ -1,5 +1,5 @@
-"""Core sliced-committor algorithm: solver, weight solvers, directions, and the
-callable committor model.
+"""Core sliced-committor algorithm: the slice solver, the weight solve, the
+directions, the feature-space metric, and the callable committor.
 
 This subpackage groups the internal implementation modules. The public API is
 re-exported from the top-level :mod:`sliced_committor` package; import from

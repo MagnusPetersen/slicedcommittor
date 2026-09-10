@@ -127,8 +127,9 @@ rate = rate_from_profiles(pi, D_q, rho_A, rho_B, reduction="plateau", band=(0.3,
 
 Each reduction accepts only its own parameter and raises on a foreign one.
 All coincide for the exact committor; every result also carries the
-arithmetic and harmonic values (`k_AB_arithmetic`, `k_AB_harmonic`), the flux
-profile `nu`, and `flatness`, the relative spread of the flux over the band.
+arithmetic and harmonic values (`k_AB_arithmetic`, `k_AB_harmonic`), the
+profiles `nu` and `D_q` on the density's grid, and `flatness`, the relative
+spread of the flux over the band.
 Their spread is the committor-quality diagnostic. The harmonic value is not a
 bound: for an approximate committor it can lie on either side of the
 arithmetic one.
