@@ -4,7 +4,7 @@
 
 | held fixed | same result |
 |---|---|
-| `seed`, JAX minor version, accelerator | bit-exact |
+| `seed`, JAX minor version, accelerator | bit-exact on the golden fixtures; a large `(M, M)` solve can differ between processes by about `1e-13` relative from the BLAS reduction order, with `G`, `a` and `b` identical |
 | `seed`, different JAX minor versions, CPU | committors and weights to about `1e-12` relative; XLA fusion moves the 1D solves by about `1e-13` |
 | `seed`, GPU versus CPU | about `1e-9` to `1e-7` relative in float64, from non-associative reductions |
 

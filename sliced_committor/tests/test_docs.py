@@ -34,7 +34,7 @@ USER_DOCS = [
     "README.md",
     "docs/quickstart.md",
     "docs/rates.md",
-    "docs/advanced.md",
+    "docs/settings.md",
     "docs/umbrella.md",
 ]
 BLOCK = re.compile(r"```python([^\n]*)\n(.*?)```", re.S)

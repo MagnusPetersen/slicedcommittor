@@ -1,5 +1,22 @@
 # Rates
 
+## What a rate needs beyond the committor
+
+The committor is a property of the equilibrium density. A rate is not: it
+also needs the time scale on which the system moves along the committor,
+the diffusion `D_q(q)`. Everything else, the density along `q` and the
+populations of the states, is in the static ensemble. So the first question
+is where `D_q` comes from, and the answer depends on your data:
+
+| you have | route | what it needs |
+|---|---|---|
+| a long unbiased trajectory in which the committor diffuses | measure `D_q` on the committor coordinate itself | a time-ordered series with `dt`, and a lag inside a diffusive regime, which `lag_scan` shows |
+| umbrella sampling along a collective variable `s` | measure `D_s` along `s`, where the restraint confines the dynamics, and map it into committor space through the Jacobian; the paper's route | the per-window time series of `s`, the reweighting weights, and the mean squared gradients of `q` and `s` in one feature space |
+| a model with a known mobility `D0` | the same map with `cv_grad_sq=1` | nothing beyond the samples |
+
+Every route ends in the same object, the pair `{D_q, pi}`, and the same
+reduction.
+
 ## The pair {D_q, pi}
 
 Projected onto the committor coordinate the dynamics is a 1D diffusion with
@@ -7,7 +24,7 @@ density `pi(q)` and diffusion `D_q(q)`. Its reactive flux `nu_R(q) = D_q(q)
 pi(q)` is constant in `q` for the exact committor (current conservation) and
 gives the rate constants `k_AB = nu_R / rho_A`, `k_BA = nu_R / rho_B`, with
 `rho_B = E[q]`. Every rate in the library is built from this pair: the
-density from the samples, the diffusion from one of three constructors, and a
+density from the samples, the diffusion from one of the three routes, and a
 reduction of the flux to one number. Rates come out in inverse units of the
 trajectory's `dt`; `sliced_committor.rates.units` converts them.
 
@@ -18,23 +35,22 @@ from sliced_committor import basin_populations, density
 
 qx = q(samples)  # (N,) committor values
 pi = density(qx, n_bins=25)  # a Profile on [0, 1]; pass sample_weights= for biased data
-rho_A, rho_B = basin_populations(qx, in_A=in_A, in_B=in_B)  # snapped to the basins
+rho_A, rho_B = basin_populations(qx, in_A=in_A, in_B=in_B)  # snapped to the states
 ```
 
 Every profiled quantity is a `Profile(levels, values, counts)`, and
 `value_at(profile, level)` reads it at a level, at an array of levels, or
-averaged over a `(lo, hi)` range.
+averaged over a `(lo, hi)` range. `counts` are the samples behind each bin,
+the undersampling guard.
 
-## Three constructors of D_q
-
-### Measured on a trajectory
+## Measured on a trajectory
 
 The Kramers-Moyal (mean squared displacement) estimator on the committor
 itself needs a time-ordered trajectory and a lag at which the committor
-diffuses. The lag is explicit on purpose: on a coordinate without a diffusive
-regime, which is the committor of a slow system, there is no `D` to estimate,
-and a rule that picked the lag with the largest `D` would return the
-short-time bounce. Look before choosing:
+diffuses. The lag is explicit on purpose: on a coordinate without a
+diffusive regime, which is the committor of a slow system, there is no `D`
+to estimate, and a rule that picked the lag with the largest `D` would
+return the short-time bounce. Look before choosing:
 
 ```python
 from sliced_committor import diffusion_profile, lag_scan
@@ -64,7 +80,7 @@ is only defined within one, and splicing runs inflates `tau_int`. The
 Kramers-Moyal estimator takes the same `run_ids=` and never pairs frames
 across a join.
 
-### Mapped from a collective variable: the Jacobian route
+## Mapped from a collective variable: the Jacobian route
 
 This is the paper's route. A diffusion measured along `s` and the diffusion
 along the committor are one configurational diffusion tensor contracted
@@ -101,7 +117,7 @@ from sliced_committor import committor_diffusion_from_cv_reparam
 D_q_reparam = committor_diffusion_from_cv_reparam(qx, s, D_s, n_bins=25, r2_min=0.5)
 ```
 
-### An assumed configurational D0
+## An assumed configurational D0
 
 Toy systems and Langevin models have a known mobility. The same map with
 `cv_grad_sq=1` converts it:
@@ -120,30 +136,15 @@ rate = rate_from_profiles(pi, D_q, rho_A, rho_B, reduction="plateau", band=(0.3,
 
 | `reduction` | `nu_R` | its parameter | what it is |
 |---|---|---|---|
-| `"plateau"` (default) | median of `D_q pi` over `band` | `band=(0.3, 0.7)`, or `"auto"` | a robust location estimate of the constant, read away from the basins where committor error inflates the flux; the published reduction |
-| `"arithmetic"` | `int_0^1 D_q pi dq` | none | the Dirichlet form, the variational upper bound on the rate; `pi`-weighted, so the basins dominate |
+| `"plateau"` (default) | median of `D_q pi` over `band` | `band=(0.3, 0.7)`, or `"auto"` | a robust location estimate of the constant, read away from the states where committor error inflates the flux; the published reduction |
+| `"arithmetic"` | `int_0^1 D_q pi dq` | none | the Dirichlet form, the variational upper bound on the rate; `pi`-weighted, so the states dominate |
 | `"harmonic"` | (`k = 1 / MFPT`) | `window=(lo, hi)` | the exact mean first-passage time of the projected 1D diffusion; bottleneck-dominated |
 | `"local"` | `D_q(q*) pi(q*)` | `q_star=0.5` | the Berezhkovskii-Szabo single-surface reading |
 
 Each reduction accepts only its own parameter and raises on a foreign one.
-All coincide for the exact committor; every result also carries the
-arithmetic and harmonic values (`k_AB_arithmetic`, `k_AB_harmonic`), the
-profiles `nu` and `D_q` on the density's grid, and `flatness`, the relative
-spread of the flux over the band.
-Their spread is the committor-quality diagnostic. The harmonic value is not a
-bound: for an approximate committor it can lie on either side of the
-arithmetic one.
-
-`band="auto"` locates the flattest band with `find_plateau` and warns when
-nothing is flat to tolerance; `plateau_ok` records it. The paper's
-label-free score `flux_cv` is the same flatness on the fixed band
-`(0.2, 0.8)`, so that fits can be compared on one band:
-
-```python
-from sliced_committor import flux_flatness
-
-flux_cv = flux_flatness(rate["nu"], (0.2, 0.8))
-```
+All coincide for the exact committor. `band="auto"` locates the flattest
+band with `find_plateau` and warns when nothing is flat to tolerance;
+`plateau_ok` records it.
 
 ## In one call
 
@@ -156,6 +157,41 @@ from sliced_committor import committor_rate
 r_mapped = committor_rate(q, samples, D_q=D_q, in_A=in_A, in_B=in_B, n_bins=25)
 r_measured = committor_rate(q, samples, trajectory=trajectory, dt=dt, lag=lag, n_bins=25)
 ```
+
+## Reading a rate
+
+Every result carries the rate constants `k_AB` and `k_BA`, the flux
+`nu_R` and the populations, the profiles `nu` (the flux) and `D_q` on the
+density's grid, the arithmetic and harmonic values beside the chosen
+reduction (`k_AB_arithmetic`, `k_AB_harmonic`), and `flatness`, the relative
+spread of the flux over the band:
+
+```python
+print(r_mapped["k_AB"], r_mapped["k_AB_arithmetic"], r_mapped["k_AB_harmonic"])
+print(r_mapped["flatness"], r_mapped["band"])
+nu, D_q_grid = r_mapped["nu"], r_mapped["D_q"]  # Profiles on the density's grid
+```
+
+Read them together. The reductions coincide for the exact committor, so
+their spread is the committor-quality diagnostic; the harmonic value is
+not a bound, and for an approximate committor it can lie on either side of
+the arithmetic one. `flatness` says the same thing on the flux profile:
+the flux of a good committor is flat across the transition region and
+inflates only in the states, where committor error dominates. A flux with
+no flat stretch means the committor is off, or the diffusion was measured
+where the coordinate is not diffusive (check `lag_scan`). The paper's
+label-free score `flux_cv` is the flatness on the fixed band `(0.2, 0.8)`,
+so that fits can be compared on one band:
+
+```python
+from sliced_committor import flux_flatness
+
+flux_cv = flux_flatness(r_mapped["nu"], (0.2, 0.8))
+```
+
+Rates are in inverse units of `dt`;
+`sliced_committor.rates.units.estimated_to_per_s(k, "ps")` converts a rate
+in inverse picoseconds to inverse seconds.
 
 ## The Kramers baseline
 
