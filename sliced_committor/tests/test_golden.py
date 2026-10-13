@@ -1,7 +1,6 @@
 """Frozen-reference gates: the numerics the published results depend on.
 
-Three reference files, all produced ONCE at tag ``v0.6.0`` by
-``golden/freeze_1_0_references.py`` (which cannot run against this version):
+Three reference files:
 
 * ``beta_invariance_golden.npz``: the slice basis on a 500-sample fixture.
 * ``ebmc_golden.npz``: the weight solve (``auto`` and ``halfset_eigen``), the
@@ -9,6 +8,12 @@ Three reference files, all produced ONCE at tag ``v0.6.0`` by
 * ``halfset_reference.npz``: the eigenband regulariser against the numpy
   prototype it was ported from, the Wolfe-Quapp sample generator, and a
   full Wolfe-Quapp fit (weights, committor on a grid, held-out cap).
+
+Everything that depends on the slice basis is frozen from this library by
+``golden/freeze_references.py``, which also reruns the prototype's weight
+path on the library's own slopes for the Wolfe-Quapp fit. The regulariser
+cases, the Wolfe-Quapp samples and the fixture itself come from tag
+``v0.6.0`` (``golden/freeze_1_0_references.py``, kept for provenance).
 
 Two tiers. The STRICT tier is the release gate: the half-set path, the
 paper's, bit for bit, the ``auto`` ridge and the basis to rounding. It holds

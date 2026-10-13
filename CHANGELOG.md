@@ -4,6 +4,43 @@ All notable changes to `sliced-committor` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The 1D slice problem was wrong on equal-count grids (`binning_method="quantile"`,
+  the default), in two ways.
+  - The state samples were binned by their relative position in the range of
+    the bin centres, as if the centres were evenly spaced, so the absorption
+    pinned each profile in the wrong place. Two fully separated states got a
+    slice fidelity of about 0.7 instead of 1, and single slices could have a
+    negative fidelity.
+  - Each row of the tridiagonal system divided both fluxes by the square of
+    the forward spacing. On a non-uniform grid that solves
+    `rho q'' = kappa [...]` instead of `(rho q')' = kappa [...]`; with equal-count
+    bins `rho_i ds_i` is constant, so between the states the profile came out
+    nearly linear in `s` instead of following `INT 1/rho`.
+
+  The state samples are now binned on the edges of the density's own
+  histogram, and the system is the conservative discretisation on the bin
+  centres: each node carries its bin's state masses, and neighbours are
+  coupled by the conductance `rho_{i+1/2} / (s_{i+1} - s_i)`. Every slice then
+  satisfies `INT rho_A q = INT rho_B (1 - q)` over its absorbing masses, and
+  with `boundary_quantile = 1` its fidelity lies in `[0, 1]`. Equal-width grids
+  change too, since the old binning spanned the bin centres instead of the
+  edges and could assign a state sample to the neighbouring bin. Fits with
+  quantile bins change materially. The golden references are re-frozen from
+  this version by `tests/golden/freeze_references.py`.
+- `SlicedCommittorResult.log_dirichlet` is the Dirichlet energy of the same
+  discrete functional, `log sum_i c_{i+1/2} (q_{i+1} - q_i)^2`; it feeds only
+  `summary()`.
+- The Ornstein-Uhlenbeck physics test compared the slice committor with an
+  `erf` profile (`q' ~ rho`) instead of the process's committor
+  (`q' ~ 1/rho`, an `erfi` profile) and passed only through the binning
+  error above. It now uses the closed form at the states' inner edges, for
+  both binning methods. New tests gate the slice fidelity, the discrete
+  balance and the profile between two separated states on both grids.
+
 ## [1.0.0] - 2026-09-09
 
 The first public release. The public surface is `sliced_committor.__all__`

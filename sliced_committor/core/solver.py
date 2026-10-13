@@ -58,7 +58,8 @@ class SlicedCommittorResult(NamedTuple):
             hand with ``result._replace(valid_mask=...)``.
         in_A, in_B: ``(N,)`` basin labels of the input samples.
         projected_samples: ``(M, N)`` the projections ``theta_j . x_n``.
-        log_dirichlet: ``(M,)`` ``log INT rho (dq/ds)^2`` per slice.
+        log_dirichlet: ``(M,)`` the log Dirichlet energy ``INT rho (dq/ds)^2`` of
+            each slice's discrete functional.
         boundary_errors: ``(M,)`` equilibrium boundary error
             ``eps_j = <q_j>_A + <1 - q_j>_B`` per slice.
         sample_weights: ``(N,)`` reweighting (e.g. MBAR), or None for uniform.
@@ -191,6 +192,7 @@ def _combine(q_all, w, c, valid_mask, original_shape):
         "binning_method",
         "n_min",
         "use_subsample_quantile",
+        "return_edges",
     ),
 )
 def compute_1d_free_energy(
@@ -201,13 +203,15 @@ def compute_1d_free_energy(
     n_min=10,
     s_subsample=None,
     use_subsample_quantile=False,
+    return_edges=False,
 ):
     """``-log rho(s)`` along one slice from the projected samples.
 
-    Bin centres and free energies (shifted so the minimum is 0). ``quantile``
-    bins hold equal counts, ``equal_width`` bins are uniform in ``s``. Every
-    bin density is floored at ``max(n_min / (N ds), density_floor)`` so that
-    tail bins with a handful of samples cannot produce arbitrarily high free
+    Bin centres and free energies (shifted so the minimum is 0), and with
+    ``return_edges`` also the ``n_bins + 1`` bin edges. ``quantile`` bins
+    hold equal counts, ``equal_width`` bins are uniform in ``s``. Every bin
+    density is floored at ``max(n_min / (N ds), density_floor)`` so that tail
+    bins with a handful of samples cannot produce arbitrarily high free
     energies.
     """
     s = s_projected
@@ -243,7 +247,10 @@ def compute_1d_free_energy(
         density = jnp.maximum(counts / (N * bin_width), effective_floor)
 
     F_values = -jnp.log(density)
-    return s_centers, F_values - jnp.min(F_values)
+    F_values = F_values - jnp.min(F_values)
+    if return_edges:
+        return s_centers, F_values, bin_edges
+    return s_centers, F_values
 
 
 # =============================================================================
@@ -308,8 +315,8 @@ def compute_1d_rd_committor(
     s_A_proj,
     s_B_proj,
     *,
+    bin_edges,
     rd_kappa,
-    ds_arr,
     boundary_quantile,
     s_A_sorted,
     s_B_sorted,
@@ -322,43 +329,46 @@ def compute_1d_rd_committor(
     ``q -> 0`` in A and ``q -> 1`` in B without any inversion step.
     ``boundary_quantile < 1`` zeroes ``rho_A``, ``rho_B`` past the inner-edge
     quantile of the state projections (the halo tail).
+
+    The linear system is the stationarity condition of the discrete functional
+    on the grid of bin centres ``s_values``: node ``i`` carries the state
+    masses of bin ``i`` (each state's projections binned with the same
+    ``bin_edges`` as the density), and nodes ``i`` and ``i + 1`` are coupled
+    by the conductance ``rho_{i+1/2} / (s_{i+1} - s_i)``. The scheme is
+    conservative on any grid, equal-count bins included: summing its rows
+    gives ``INT rho_A q = INT rho_B (1 - q)`` over the absorbing masses. With
+    ``boundary_quantile = 1`` those are all of each state's samples, so the
+    slice fidelity ``INT rho_B q - INT rho_A q`` lies in ``[0, 1]``; below 1 the
+    balance leaves out the state mass past the cut.
     """
     n = s_values.shape[0]
     rho = jnp.exp(-(F_values - jnp.min(F_values)))
-    s_min, s_max = s_values[0], s_values[-1]
-    span = s_max - s_min + 1e-10
+    inner_edges = bin_edges[1:-1]
 
-    def _state_density(s_proj_state):
-        idx = jnp.clip(jnp.floor((s_proj_state - s_min) / span * n).astype(jnp.int32), 0, n - 1)
-        n_state = s_proj_state.shape[0]
-        hist = jnp.zeros(n).at[idx].add(jnp.ones(n_state))
-        total = jnp.maximum(jnp.float32(n_state), 1e-10)
-        return hist / (total * ds_arr + 1e-30)
+    def _state_mass(s_proj_state):
+        idx = jnp.clip(jnp.searchsorted(inner_edges, s_proj_state), 0, n - 1)
+        hist = jnp.zeros(n).at[idx].add(1.0)
+        return hist / max(s_proj_state.shape[0], 1)
 
-    rho_A = _state_density(s_A_proj)
-    rho_B = _state_density(s_B_proj)
+    m_A = _state_mass(s_A_proj)
+    m_B = _state_mass(s_B_proj)
 
     if boundary_quantile < 1.0:
         A_is_left = jnp.mean(s_A_proj) < jnp.mean(s_B_proj)
-        rho_A = jnp.where(
-            _absorption_keep_mask(s_values, s_A_sorted, A_is_left, boundary_quantile), rho_A, 0.0
+        m_A = jnp.where(
+            _absorption_keep_mask(s_values, s_A_sorted, A_is_left, boundary_quantile), m_A, 0.0
         )
-        rho_B = jnp.where(
-            _absorption_keep_mask(s_values, s_B_sorted, ~A_is_left, boundary_quantile), rho_B, 0.0
+        m_B = jnp.where(
+            _absorption_keep_mask(s_values, s_B_sorted, ~A_is_left, boundary_quantile), m_B, 0.0
         )
 
-    # Tridiagonal system of the finite-difference discretisation.
-    rho_half_plus = 0.5 * (rho[:-1] + rho[1:])
-    ds2 = ds_arr**2
-    sub_interior = rho_half_plus[:-1] / ds2[1 : n - 1]
-    sup_interior = rho_half_plus[1:] / ds2[1 : n - 1]
-    c0 = rho_half_plus[0] / ds2[0]
-    an = rho_half_plus[-1] / ds2[n - 1]
-    kappa_rhoAB = rd_kappa * (rho_A + rho_B)
-    sub = jnp.concatenate([jnp.zeros(1), sub_interior, an[None]])
-    sup = jnp.concatenate([c0[None], sup_interior, jnp.zeros(1)])
-    diag = -(sub + sup) - kappa_rhoAB
-    rhs = -rd_kappa * rho_B
+    # Tridiagonal system: row i is sub_i q_{i-1} + diag_i q_i + sup_i q_{i+1} = rhs_i.
+    rho_half = 0.5 * (rho[:-1] + rho[1:])
+    conductance = rho_half / jnp.maximum(jnp.diff(s_values), 1e-10)
+    sub = jnp.concatenate([jnp.zeros(1), conductance])
+    sup = jnp.concatenate([conductance, jnp.zeros(1)])
+    diag = -(sub + sup) - rd_kappa * (m_A + m_B)
+    rhs = -rd_kappa * m_B
 
     # Thomas algorithm with scalar carries.
     b0 = jnp.where(jnp.abs(diag[0]) > 1e-30, diag[0], 1e-30)
@@ -395,33 +405,15 @@ def compute_1d_rd_committor(
 # =============================================================================
 
 
-def _compute_dqds_grid(s_vals, q_vals):
-    """``dq/ds`` on the grid: central differences inside, one-sided at the ends."""
-    q_safe = jnp.where(jnp.isnan(q_vals), 0.0, q_vals)
-    ds_central = jnp.maximum(s_vals[2:] - s_vals[:-2], 1e-30)
-    grad_interior = (q_safe[2:] - q_safe[:-2]) / ds_central
-    ds_fwd = jnp.maximum(s_vals[1] - s_vals[0], 1e-30)
-    ds_bwd = jnp.maximum(s_vals[-1] - s_vals[-2], 1e-30)
-    return jnp.concatenate(
-        [
-            ((q_safe[1] - q_safe[0]) / ds_fwd)[None],
-            grad_interior,
-            ((q_safe[-1] - q_safe[-2]) / ds_bwd)[None],
-        ]
-    )
-
-
-def _compute_log_dirichlet(s_vals, F_vals, q_vals, ds_arr):
-    """``log INT rho (dq/ds)^2 ds`` over the whole slice (log-space trapezoid)."""
-    n = s_vals.shape[0]
-    grad = _compute_dqds_grid(s_vals, q_vals)
-    log_rho = -(F_vals - jnp.min(F_vals))
-    log_grad_sq = jnp.log(jnp.maximum(grad**2, 1e-30))
-    idxs = jnp.arange(n)
-    is_endpoint = (idxs == 0) | (idxs == n - 1)
-    log_trap_weight = jnp.where(is_endpoint, jnp.log(0.5), 0.0)
-    log_ds_arr = jnp.log(jnp.maximum(ds_arr, 1e-30))
-    return jax.scipy.special.logsumexp(log_rho + log_grad_sq + log_trap_weight + log_ds_arr)
+def _compute_log_dirichlet(s_vals, F_vals, q_vals):
+    """``log sum_i c_{i+1/2} (q_{i+1} - q_i)^2``: the Dirichlet energy ``INT rho (dq/ds)^2``
+    of the slice's discrete functional, with the conductances
+    ``c_{i+1/2} = rho_{i+1/2} / (s_{i+1} - s_i)`` of :func:`compute_1d_rd_committor`."""
+    q = jnp.where(jnp.isnan(q_vals), 0.0, q_vals)
+    rho = jnp.exp(-(F_vals - jnp.min(F_vals)))
+    log_c = jnp.log(0.5 * (rho[:-1] + rho[1:])) - jnp.log(jnp.maximum(jnp.diff(s_vals), 1e-10))
+    log_dq2 = jnp.log(jnp.maximum(jnp.diff(q) ** 2, 1e-300))
+    return jax.scipy.special.logsumexp(log_c + log_dq2)
 
 
 # =============================================================================
@@ -467,7 +459,7 @@ def _slices(directions, inputs: _SliceInputs, settings: _SliceSettings):
     def _slice(theta):
         s_projected = inputs.samples @ theta
         s_sub = s_projected[inputs.subsample_idx] if settings.use_subsample else None
-        s_vals, F_vals = compute_1d_free_energy(
+        s_vals, F_vals, edges = compute_1d_free_energy(
             s_projected,
             settings.n_bins,
             density_floor=settings.density_floor,
@@ -475,9 +467,8 @@ def _slices(directions, inputs: _SliceInputs, settings: _SliceSettings):
             n_min=settings.n_min,
             s_subsample=s_sub,
             use_subsample_quantile=settings.use_subsample,
+            return_edges=True,
         )
-        ds_arr = jnp.diff(s_vals)
-        ds_arr = jnp.concatenate([ds_arr, ds_arr[-1:]])
         s_A = s_projected[inputs.A_indices]
         s_B = s_projected[inputs.B_indices]
         s_A_sorted = jnp.sort(s_A)
@@ -490,14 +481,14 @@ def _slices(directions, inputs: _SliceInputs, settings: _SliceSettings):
             F_vals,
             s_A,
             s_B,
+            bin_edges=edges,
             rd_kappa=settings.rd_kappa,
-            ds_arr=ds_arr,
             boundary_quantile=settings.boundary_quantile,
             s_A_sorted=s_A_sorted,
             s_B_sorted=s_B_sorted,
         )
         is_valid = jnp.all(jnp.isfinite(q_rd))
-        log_D = jnp.where(is_valid, _compute_log_dirichlet(s_vals, F_vals, q_rd, ds_arr), jnp.inf)
+        log_D = jnp.where(is_valid, _compute_log_dirichlet(s_vals, F_vals, q_rd), jnp.inf)
         q_rd_safe = jnp.where(jnp.isnan(q_rd), 0.0, q_rd)
         q_A = _interp_committor(s_vals, q_rd_safe, s_A)
         q_B = _interp_committor(s_vals, q_rd_safe, s_B)
