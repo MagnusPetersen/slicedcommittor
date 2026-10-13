@@ -58,9 +58,10 @@ def flux_flatness(profile: Profile, band) -> float:
     The committor-coordinate reactive flux ``nu_R(q) = D_q(q) pi(q)`` is constant
     in ``q`` for the exact committor (current conservation), so its relative
     spread over a band measures how far a fitted committor is from it. Only
-    finite, positive bins count; NaN with fewer than two of them. The paper's
-    ``flux_cv`` is this statistic on the fixed band ``(0.2, 0.8)``, so that fits
-    can be compared on one band.
+    finite, positive bins count; NaN with fewer than two of them. The score
+    ``flux_cv`` of :func:`sliced_committor.umbrella.fit_and_rate` is this
+    statistic on the fixed band ``(0.2, 0.8)``, so that fits can be compared
+    on one band.
     """
     lo, hi = _check_band(band)
     levels = np.asarray(profile.levels, dtype=np.float64)

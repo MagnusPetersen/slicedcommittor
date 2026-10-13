@@ -424,6 +424,78 @@ def test_find_plateau_with_nothing_valid_is_not_ok_and_the_rate_warns():
 
 
 # ---------------------------------------------------------------------------
+# the band-free read-off
+# ---------------------------------------------------------------------------
+def _exact_1d_committor_samples(n=200_000, a=0.9, seed=0):
+    """Boltzmann samples of ``V = (x^2 - 1)^2`` with the exact committor between
+    ``x < -a`` and ``x > a``: ``(q, q'^2, in_A, in_B, nu)``."""
+    x = np.linspace(-2.5, 2.5, 200_001)
+    dx = x[1] - x[0]
+    V = (x**2 - 1.0) ** 2
+    cdf = np.cumsum(np.exp(-V))
+    xs = np.interp(np.random.default_rng(seed).random(n) * cdf[-1], cdf, x)
+    inside = np.abs(x) < a
+    Z_q = float(np.sum(np.exp(V[inside])) * dx)
+    Z_pi = float(np.sum(np.exp(-V)) * dx)
+    q_grid = np.cumsum(np.where(inside, np.exp(V), 0.0)) * dx / Z_q
+    q = np.clip(np.interp(xs, x, q_grid), 0.0, 1.0)
+    Vs = (xs**2 - 1.0) ** 2
+    grad_sq = np.where(np.abs(xs) < a, np.exp(2.0 * Vs) / Z_q**2, 0.0)
+    return q, grad_sq, xs < -a, xs > a, 1.0 / (Z_q * Z_pi)
+
+
+def test_variational_flux_reads_the_exact_flux_under_any_monotone_recalibration():
+    q, g2, in_A, in_B, nu = _exact_1d_committor_samples()
+    ro = sc.variational_flux(q, g2, in_A=in_A, in_B=in_B)
+    assert ro["nu"] == pytest.approx(nu, rel=0.02)
+    assert ro["energy"] == pytest.approx(nu, rel=0.02)
+    np.testing.assert_allclose(ro["separation"].values, 1.0, atol=1e-12)
+    # q^3 spaces the same level sets differently: the read-off does not move,
+    # while the energy rises to int (3 q^2)^2 dq = 9/5 of the flux
+    ro3 = sc.variational_flux(q**3, 9.0 * q**4 * g2, in_A=in_A, in_B=in_B)
+    assert ro3["nu"] == pytest.approx(ro["nu"], rel=0.01)
+    assert ro3["energy"] == pytest.approx(1.8 * ro["energy"], rel=0.02)
+    assert ro3["calibration_error"] == pytest.approx(0.8, abs=0.03)
+    assert abs(ro["calibration_error"]) < 0.02
+
+
+def test_variational_flux_is_bounded_by_the_fit_quotient_and_returns_a_calibrated_fit():
+    samples, in_A, in_B = double_well_samples(n=2500, seed=0)
+    _, fit = sc.fit_committor(
+        jnp.asarray(samples),
+        in_A=in_A,
+        in_B=in_B,
+        n_directions=64,
+        n_bins=100,
+        seed=2,
+        return_details=True,
+    )
+    q_raw = sc.build_committor(fit.result, fit.weights, clip=False)
+    vals = np.asarray(q_raw(jnp.asarray(samples)))
+    grad_sq = np.sum(np.asarray(sc.committor_gradient(q_raw, jnp.asarray(samples))) ** 2, axis=1)
+    E = float(np.mean(grad_sq))
+    F_hat = float(vals[in_B].mean() - vals[in_A].mean())
+    ro = sc.variational_flux(vals, grad_sq, in_A=in_A, in_B=in_B, n_bins=50)
+    # f(u) = u is among the trial functions, so the read-off is never above the fit's quotient
+    assert ro["nu"] <= E / F_hat**2 * (1.0 + 1e-12)
+    assert ro["energy"] == pytest.approx(E, rel=1e-12)
+    qt = ro["q_tilde"]
+    assert qt[in_A].mean() == pytest.approx(0.0, abs=1e-12)
+    assert qt[in_B].mean() == pytest.approx(1.0, rel=1e-12)  # unit empirical fidelity
+    assert np.all(np.diff(qt[np.argsort(vals)]) >= -1e-12)  # a reparametrisation: monotone in q
+
+
+def test_variational_flux_rejects_a_constant_coordinate_and_an_empty_basin():
+    n = 100
+    in_A = np.arange(n) < 10
+    in_B = np.arange(n) >= 90
+    with pytest.raises(ValueError, match="single value"):
+        sc.variational_flux(np.zeros(n), np.ones(n), in_A=in_A, in_B=in_B)
+    with pytest.raises(ValueError, match="both basins"):
+        sc.variational_flux(np.linspace(0, 1, n), np.ones(n), in_A=in_A, in_B=np.zeros(n, bool))
+
+
+# ---------------------------------------------------------------------------
 # layering
 # ---------------------------------------------------------------------------
 def test_rates_never_imports_the_umbrella_subpackage():

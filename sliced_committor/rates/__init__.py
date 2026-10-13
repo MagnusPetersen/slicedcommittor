@@ -19,7 +19,9 @@ three constructors:
 * an assumed configurational ``D0``: the same map with ``cv_grad_sq=1``.
 
 :func:`rate_from_profiles` reduces the pair; :func:`committor_rate` does the
-whole thing in one call. :mod:`sliced_committor.rates.baselines` holds the
+whole thing in one call. :func:`variational_flux` reads the flux off the
+fitted committor's level sets instead, with no band: the variational
+principle applied to the fit's own reparametrisations. :mod:`sliced_committor.rates.baselines` holds the
 committor-free Kramers row and :mod:`sliced_committor.rates.units` the
 rate-unit conversions.
 """
@@ -41,6 +43,7 @@ from .quantities import (
     density,
     linear_response_grad_sq,
 )
+from .readoff import variational_flux
 
 __all__ = [
     # the static ensemble
@@ -60,6 +63,7 @@ __all__ = [
     # the reduction
     "rate_from_profiles",
     "committor_rate",
+    "variational_flux",
     # profiles and their reducers
     "Profile",
     "value_at",

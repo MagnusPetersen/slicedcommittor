@@ -92,7 +92,8 @@ D_s, tau_int = out["D_s"]["value"], out["D_s"]["tau_int"]
    * `"km_q"`: the Kramers-Moyal estimate on the committor at `lag`, which
      needs a diffusive regime the committor of a slow system lacks;
    * `reductions=("plateau", "harmonic", "arithmetic")` by default,
-     `"local"` on request;
+     `"local"` on request, and `"variational"`, the band-free read-off of
+     `variational_flux` (the paper's), with `diffusion=("cvmap",)`;
 5. computes the committor-free Kramers baseline along the progress
    coordinate.
 

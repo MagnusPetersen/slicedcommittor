@@ -6,6 +6,23 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+
+- `variational_flux(values, grad_sq, *, in_A, in_B, sample_weights=None,
+  n_bins=100)`: the reactive flux read off a fitted committor's level sets
+  with no band. It minimises the quotient `E[f(q)] / F[f(q)]^2` over every
+  function `f` of the committor, which has the closed form
+  `[int g(z)^2 / Phi(z) dz]^-1` (`Phi` the flux through the level set `q = z`,
+  `g` the separation of the labelled states at that level). It equals the
+  flux for the exact committor under any monotone recalibration, never
+  exceeds the fit's own quotient, and returns `calibration_error = E / nu - 1`,
+  a lower bound on the relative Dirichlet error at unit fidelity, with the
+  optimal recalibration `q_tilde`. The public surface grows to 37 names.
+- `umbrella.fit_and_rate(..., reductions=("variational",))` reads the rate
+  that way on the unclipped committor and scales the flux by the
+  configurational `D0` of the `"cvmap"` route (`readoff_bins=100`); the
+  read-off's per-bin profiles land under `profiles["readoff"]`.
+
 ### Fixed
 
 - The 1D slice problem was wrong on equal-count grids (`binning_method="quantile"`,

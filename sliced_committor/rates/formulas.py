@@ -16,7 +16,7 @@ and a ``reduction`` picks the number:
 * ``"plateau"``: the median of ``nu_R`` over a band, ``(0.3, 0.7)`` by default
   or ``"auto"`` for the flattest band (:func:`find_plateau`). A robust location
   estimate of the constant, read away from the basins where committor error
-  inflates the flux. The published reduction.
+  inflates the flux.
 * ``"local"``: ``nu_R(q*)`` at one level, ``0.5`` by default: the
   Berezhkovskii-Szabo single-surface reading.
 
@@ -24,7 +24,9 @@ All coincide for the exact committor. Every result also carries the
 arithmetic and harmonic values and the ``flatness`` of the flux over the
 band: their spread is the committor-quality diagnostic. Note that the
 harmonic value is not a bound; for an approximate committor it can lie on
-either side of the arithmetic one.
+either side of the arithmetic one. The band-free read-off the paper uses
+needs the per-sample committor and the basin labels rather than profiles:
+:func:`sliced_committor.variational_flux`.
 """
 
 import warnings

@@ -95,12 +95,48 @@ def test_bundle_carries_every_constructor_reduction_and_the_baseline(bundle):
     assert out["D_s"]["n_windows"] == 8 and out["D_s"]["tau_int"] > 1.0
 
 
+def test_cvmap_variational_rate_matches_the_exact_double_well_rate(dataset, bundle):
+    rw, plateau_bundle = bundle
+    out = fit_and_rate(
+        dataset,
+        dataset.features,
+        rw.sample_weights,
+        n_directions=64,
+        n_bins=60,
+        seed=0,
+        diffusion=("cvmap",),
+        reductions=("plateau", "variational"),
+        n_diff_bins=25,
+    )
+    k_AB, k_BA = _exact_rates(D0, A)
+    got = out["rates"]["cvmap"]["variational"]
+    assert 0.6 < got["k_AB"] / k_AB < 1.5, (got["k_AB"], k_AB)
+    assert 0.6 < got["k_BA"] / k_BA < 1.5, (got["k_BA"], k_BA)
+    assert got["k_BA"] / got["k_AB"] == pytest.approx(got["rho_A"] / got["rho_B"], rel=1e-12)
+    assert got["calibration_error"] >= 0.0 and got["n_bins"] == 100
+    # the same fit as the plateau bundle's, read without a band
+    assert out["rates"]["cvmap"]["plateau"]["k_AB"] == pytest.approx(
+        plateau_bundle["rates"]["cvmap"]["plateau"]["k_AB"], rel=1e-9
+    )
+    ro = out["profiles"]["readoff"]
+    assert ro["levels"].shape == ro["flux"].shape == ro["separation"].shape == (100,)
+
+
 def test_unknown_constructors_and_reductions_are_rejected(dataset):
     w = np.full(dataset.n_frames, 1.0 / dataset.n_frames)
     with pytest.raises(ValueError, match="diffusion"):
         fit_and_rate(dataset, dataset.features, w, diffusion=("bogus",), n_directions=8)
     with pytest.raises(ValueError, match="reduction"):
         fit_and_rate(dataset, dataset.features, w, reductions=("bogus",), n_directions=8)
+    with pytest.raises(ValueError, match="cvmap"):
+        fit_and_rate(
+            dataset,
+            dataset.features,
+            w,
+            diffusion=("cvmap", "hummer_q"),
+            reductions=("variational",),
+            n_directions=8,
+        )
 
 
 def test_strict_false_records_a_failed_constructor_instead_of_raising(dataset):
