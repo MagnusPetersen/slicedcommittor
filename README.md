@@ -154,8 +154,10 @@ k_AB, k_BA, flatness = rate["k_AB"], rate["k_BA"], rate["flatness"]
 ```
 
 `flatness` is the relative spread of the flux over the transition region,
-the committor-quality score that needs no reference.
-[docs/rates.md](docs/rates.md) walks through the three routes, the four
+the committor-quality score that needs no reference. The paper reads the
+flux without a band, with `variational_flux`, which also turns that spread
+into a lower bound on the committor's error.
+[docs/rates.md](docs/rates.md) walks through the three routes, the
 reductions and how to read their spread.
 
 ## Umbrella sampling

@@ -220,3 +220,38 @@ def test_bootstrap_spread_tracks_the_seed_to_seed_spread():
     boot = sc.bootstrap_weights(res0, w0, n_boot=30, block_len=1, seed=0)
     ratio = boot.moment_gap.std(ddof=1) / np.std(gaps, ddof=1)
     assert 0.3 < ratio < 3.0, ratio
+
+
+def test_run_ids_keep_the_half_set_filter_from_reading_windows_as_noise():
+    """Umbrella windows in array order: folds blocked within each window give two
+    halves that sample the same ensembles, so the filter keeps more of the spectrum
+    and the solve lands at a lower Dirichlet energy than with window-confounded folds."""
+    from ._helpers import umbrella_double_well_dataset
+
+    ds = umbrella_double_well_dataset(n_windows=8, n_per=4000, seed=2)
+    res = sc.compute_sliced_committor(
+        ds.features,
+        in_A=ds.in_A,
+        in_B=ds.in_B,
+        n_directions=48,
+        seed=1,
+        n_bins=60,
+        binning_method="equal_width",
+    )
+    plain = sc.solve_weights(res)
+    by_run = sc.solve_weights(res, run_ids=ds.window_ids)
+    kept = lambda w: int(np.sum(np.asarray(w.diagnostics["band_ssnr"]) > 1.0))  # noqa: E731
+    assert kept(by_run) >= kept(plain)
+    assert by_run.dirichlet_energy < plain.dirichlet_energy
+
+
+def test_a_non_finite_slice_leaves_the_energy_and_checks_finite():
+    s, in_A, in_B = two_basin_samples(3000, dim=2)
+    res = sc.compute_sliced_committor(s, in_A=in_A, in_B=in_B, n_directions=12, seed=0, n_bins=30)
+    q1d = np.asarray(res.committors_1d).copy()
+    q1d[3] = np.nan
+    vm = np.asarray(res.valid_mask, bool).copy()
+    vm[3] = False
+    w = sc.solve_weights(res._replace(committors_1d=jnp.asarray(q1d), valid_mask=jnp.asarray(vm)))
+    assert np.isfinite(w.dirichlet_energy) and np.isfinite(w.diagnostics["mu_A_check"])
+    assert float(np.asarray(w.w)[3]) == 0.0

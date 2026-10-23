@@ -134,6 +134,7 @@ def fit_committor(
     seed: int = 42,
     tikhonov="halfset_eigen",
     heldout_cap: bool = False,
+    run_ids=None,
     return_details: bool = False,
     **solver_kwargs,
 ):
@@ -151,6 +152,9 @@ def fit_committor(
         heldout_cap: also read the out-of-sample Dirichlet cap
             (``fit.weights.heldout_cap``), for ranking settings without a
             reference committor.
+        run_ids: ``(N,)`` labels of the contiguous runs the frames come from
+            (umbrella windows, replicates), so the half-set folds are blocked
+            within each run (see :func:`solve_weights`); None is one run.
         return_details: return ``(q, CommittorFit)`` instead of ``q``.
         **solver_kwargs: forwarded to :func:`compute_sliced_committor`
             (``n_bins``, ``binning_method``, ``boundary_quantile``,
@@ -167,7 +171,7 @@ def fit_committor(
         seed=seed,
         **solver_kwargs,
     )
-    weights = solve_weights(result, tikhonov=tikhonov, heldout_cap=heldout_cap)
+    weights = solve_weights(result, tikhonov=tikhonov, heldout_cap=heldout_cap, run_ids=run_ids)
     q = build_committor(result, weights)
     if return_details:
         return q, CommittorFit(committor=q, result=result, weights=weights)

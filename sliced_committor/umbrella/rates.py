@@ -6,6 +6,12 @@ committor fit on the reweighted static ensemble, then the rate bundle from the
 with the committor-free Kramers baseline beside them. It orchestrates nothing
 else; building the :class:`USDataset` is the caller's job.
 
+The reductions (``reductions=``) are those of
+:func:`sliced_committor.rate_from_profiles`, plus ``"variational"``: the
+band-free read-off :func:`sliced_committor.variational_flux` of the fitted
+committor's level sets, scaled by the configurational ``D0 = D_s / <|grad
+s|^2>`` of the ``"cvmap"`` route, the only constructor it applies to.
+
 The diffusion constructors (``diffusion=``):
 
 * ``"cvmap"``, the paper's route: ``D_s`` along the progress coordinate from
@@ -31,7 +37,8 @@ from typing import Any
 
 import numpy as np
 
-from ..core.committor import fit_committor
+from .._runs import segment_ids
+from ..core.committor import build_committor, fit_committor
 from ..rates import (
     Profile,
     basin_populations,
@@ -47,11 +54,14 @@ from ..rates import (
 from ..rates.baselines import pmf_kramers_rate
 from ..rates.formulas import REDUCTIONS, flux_profiles
 from ..rates.quantities import _grad_sq_profile, _values_and_grad_sq
+from ..rates.readoff import variational_flux
 from .dataset import USDataset
 
 logger = logging.getLogger(__name__)
 
 DIFFUSIONS = ("cvmap", "hummer_q", "km_q")
+#: the profile reductions, plus the band-free read-off of the cvmap route
+UMBRELLA_REDUCTIONS = (*REDUCTIONS, "variational")
 #: the fixed band of the label-free committor-quality score ``flux_cv``
 QUALITY_BAND = (0.2, 0.8)
 
@@ -126,6 +136,7 @@ def fit_and_rate(
     reductions=("plateau", "harmonic", "arithmetic"),
     lag: int = 1,
     n_diff_bins: int = 25,
+    readoff_bins: int = 100,
     strict: bool = True,
     **solver_kwargs,
 ) -> dict[str, Any]:
@@ -152,13 +163,19 @@ def fit_and_rate(
             windows (call that yourself to select windows).
         run_ids: ``(N,)`` labels of independent contiguous runs (replicates),
             which no diffusion estimator reads across; None when every window
-            is one run.
+            is one run. The committor's half-set folds are blocked within every
+            (window, run) stretch.
         diffusion: which constructors of ``D_q`` to run, from
             ``("cvmap", "hummer_q", "km_q")``.
-        reductions: which reductions of ``{D_q, pi}`` to report, from
-            ``("plateau", "harmonic", "arithmetic", "local")``.
+        reductions: which reductions to report, from ``("plateau",
+            "harmonic", "arithmetic", "local", "variational")``.
+            ``"variational"`` reads the flux off the unclipped committor's
+            level sets (:func:`sliced_committor.variational_flux`) and needs
+            ``diffusion=("cvmap",)``.
         lag: the Kramers-Moyal lag of ``"km_q"``, in frames.
-        n_diff_bins: the committor grid of the profiles and the reductions.
+        n_diff_bins: the committor grid of the profiles and the profile
+            reductions.
+        readoff_bins: the equal-count bins of the ``"variational"`` read-off.
         strict: raise on the first failing estimator (default); False records
             an estimator's ``ValueError``/``RuntimeError`` under ``errors`` and
             carries on with the rest of the bundle (the committor fit itself
@@ -169,16 +186,24 @@ def fit_and_rate(
         ``cv_grad_sq``, ``profiles`` (``levels``, ``counts``, ``pi``,
         ``grad_sq``, and per constructor ``D_q`` and ``flux``), ``rates`` (per
         constructor, per reduction: :func:`sliced_committor.rate_from_profiles`
-        without its profiles), ``flux_cv`` (per constructor: the constancy of
+        without its profiles; for ``"variational"`` the flux, populations and
+        rate constants with the read-off's ``calibration_error`` and
+        ``n_bins``, and its per-bin ``flux`` and ``separation`` under
+        ``profiles["readoff"]``), ``flux_cv`` (per constructor: the constancy of
         the flux over ``QUALITY_BAND``), ``kramers`` (the baseline) and
         ``errors``.
     """
     unknown = sorted(set(diffusion) - set(DIFFUSIONS))
     if unknown:
         raise ValueError(f"unknown diffusion constructor(s) {unknown}; choose from {DIFFUSIONS}")
-    unknown = sorted(set(reductions) - set(REDUCTIONS))
+    unknown = sorted(set(reductions) - set(UMBRELLA_REDUCTIONS))
     if unknown:
-        raise ValueError(f"unknown reduction(s) {unknown}; choose from {REDUCTIONS}")
+        raise ValueError(f"unknown reduction(s) {unknown}; choose from {UMBRELLA_REDUCTIONS}")
+    if "variational" in reductions and tuple(diffusion) != ("cvmap",):
+        raise ValueError(
+            "reduction 'variational' scales the read-off by the constant D0 of the cvmap "
+            "route; request it with diffusion=('cvmap',)"
+        )
 
     X = np.asarray(features, dtype=np.float64)
     in_A = np.asarray(dataset.in_A, dtype=bool)
@@ -190,6 +215,10 @@ def fit_and_rate(
         "sample_weights": sw,
         **solver_kwargs,
     }
+    # every umbrella window (and replicate) is its own ensemble: the half-set
+    # folds take a contiguous share of each, so the two halves sample them alike
+    wid = np.asarray(dataset.window_ids)
+    runs = segment_ids(wid) if run_ids is None else segment_ids(wid, run_ids)
     q, detail = fit_committor(
         X,
         in_A=in_A,
@@ -197,6 +226,7 @@ def fit_and_rate(
         n_directions=n_directions,
         seed=seed,
         tikhonov=tikhonov,
+        run_ids=runs,
         return_details=True,
         **solver,
     )
@@ -211,12 +241,17 @@ def fit_and_rate(
         },
         "errors": {},
     }
+    # the read-off wants the unclipped sum, whose level sets extend past [0, 1]
+    q_raw = (
+        build_committor(detail.result, detail.weights, clip=False)
+        if "variational" in reductions
+        else None
+    )
     del detail  # the (M, N) projected samples are not needed past this point
 
     # one autodiff pass gives the per-sample committor AND its squared gradient
     qv, grad_sq = _values_and_grad_sq(q, X, bridge_metric)
     out["q_samples"] = qv
-    wid = np.asarray(dataset.window_ids)
     dt = float(dataset.dt)
     s = progress_coordinate(dataset)
 
@@ -272,6 +307,28 @@ def fit_and_rate(
             qv, dt=dt, lag=lag, window_ids=wid, run_ids=run_ids, n_bins=n_diff_bins
         ),
     }
+
+    def _variational_rate():
+        vals, g = _values_and_grad_sq(q_raw, X, bridge_metric)
+        ro = variational_flux(vals, g, in_A=in_A, in_B=in_B, sample_weights=sw, n_bins=readoff_bins)
+        D0 = out["D_s"]["value"] / out["cv_grad_sq"]
+        nu_R = D0 * ro["nu"]
+        out["profiles"]["readoff"] = {
+            "levels": np.asarray(ro["flux"].levels),
+            "flux": D0 * np.asarray(ro["flux"].values),
+            "separation": np.asarray(ro["separation"].values),
+        }
+        return {
+            "reduction": "variational",
+            "rho_A": rho_A,
+            "rho_B": rho_B,
+            "nu_R": nu_R,
+            "k_AB": nu_R / max(rho_A, 1e-30),
+            "k_BA": nu_R / max(rho_B, 1e-30),
+            "calibration_error": ro["calibration_error"],
+            "n_bins": ro["n_bins"],
+        }
+
     out["rates"], out["flux_cv"] = {}, {}
     for name in diffusion:
         if name == "cvmap" and (out["D_s"] is None or out["cv_grad_sq"] is None):
@@ -286,10 +343,13 @@ def fit_and_rate(
         out["flux_cv"][name] = flux_flatness(nu, QUALITY_BAND)
         out["rates"][name] = {}
         for reduction in reductions:
-            rate = attempt(
-                f"{name}/{reduction}",
-                lambda r=reduction, D=D_q: rate_from_profiles(pi, D, rho_A, rho_B, reduction=r),
-            )
+            if reduction == "variational":
+                rate = attempt(f"{name}/variational", lambda: _variational_rate())
+            else:
+                rate = attempt(
+                    f"{name}/{reduction}",
+                    lambda r=reduction, D=D_q: rate_from_profiles(pi, D, rho_A, rho_B, reduction=r),
+                )
             if rate is not None:
                 out["rates"][name][reduction] = _plain(rate)
 

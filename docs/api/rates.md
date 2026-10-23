@@ -37,6 +37,14 @@ walkthrough.
       committor_rate
 ```
 
+## The band-free read-off
+
+```{eval-rst}
+.. automodule:: sliced_committor.rates.readoff
+   :members:
+      variational_flux
+```
+
 ## Profiles and their reducers
 
 ```{eval-rst}

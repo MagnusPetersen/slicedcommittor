@@ -4,6 +4,108 @@ All notable changes to `sliced-committor` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `variational_flux(values, grad_sq, *, in_A, in_B, sample_weights=None,
+  n_bins=100)`: the reactive flux read off a fitted committor's level sets
+  with no band. It minimises the quotient `E[f(q)] / F[f(q)]^2` over every
+  function `f` of the committor, which has the closed form
+  `[int g(z)^2 / Phi(z) dz]^-1` (`Phi` the flux through the level set `q = z`,
+  `g` the separation of the labelled states at that level). It equals the
+  flux for the exact committor under any monotone recalibration, never
+  exceeds the fit's own quotient, and returns `calibration_error = E / nu - 1`,
+  a lower bound on the relative Dirichlet error at unit fidelity, with the
+  optimal recalibration `q_tilde`. The public surface grows to 37 names.
+- `umbrella.fit_and_rate(..., reductions=("variational",))` reads the rate
+  that way on the unclipped committor and scales the flux by the
+  configurational `D0` of the `"cvmap"` route (`readoff_bins=100`); the
+  read-off's per-bin profiles land under `profiles["readoff"]`.
+- `run_ids=` in `solve_weights` and `fit_committor` blocks the half-set (and
+  held-out-cap) folds within every run, so both halves sample every run;
+  `bootstrap_weights` passes its `run_ids` on to the replicate solves.
+- `rd_stiffness=` in `compute_sliced_committor`: the slice absorption as the
+  dimensionless `kappa~ = kappa p_max sigma^2` of each slice, with
+  `rd_stiffness=0` the `kappa -> 0` limit in closed form,
+  `q' ~ (C_A - C_B) / rho`. The default stays the absolute `rd_kappa`.
+
+### Changed
+
+- The half-set solve applies the filtered inverse in the filter's own
+  eigenbasis, `V diag(1/lam_reg) V^T`, instead of factorising the rebuilt
+  filtered Gram. The closed form is the same; the rebuild summed eigenvalues
+  the filter inflates by up to `1e12`, and its rounding reached the weights
+  at `1e-5` on a 64-direction Wolfe-Quapp fit. With the band-correlation fix
+  below, the half-set weights agree to `3e-13` between JAX 0.5.3, 0.6.2 and
+  0.10.1 and between CPUs, where they differed by up to `1.5e-3`.
+  `diagnostics["cond_chol"]` of a half-set solve is the exact condition
+  number of the filtered Gram. The golden references are re-frozen; their
+  independent reference path implements the filter and the solve from their
+  definitions on the half-Grams of the v0.6.0 prototype.
+
+### Fixed
+
+- The band correlation of the half-set filter was centred (Pearson), so it
+  depended on the signs `eigh` gives the eigenvectors, which rounding can
+  flip. It is the uncentred correlation, which depends only on each band's
+  eigenspace. The transition RMSE of the paper's 2D, AIB9 and villin fits
+  and the held-out cap of its chignolin fit move by less than 0.1%; the
+  committor of the golden Wolfe-Quapp fit moves by `2e-3`.
+- Sample weights never reached the slices: each slice's density and state
+  masses were unweighted histograms of a biased ensemble, and the weights
+  entered only the Gram matrix and `boundary_errors`. They are now the
+  weighted histograms (uniform weights reproduce the unweighted slices to
+  rounding). Weighted fits change: at the paper's chignolin settings the
+  folding rate moves from 2.46 to 2.81 per µs and the unfolding rate from
+  0.668 to 0.711 per µs, nearly all of it through the state masses (every
+  chignolin slice overlaps its states, so its pinned profile never reads the
+  density).
+- `umbrella.fit_and_rate` cut the half-set folds in array order, which for
+  window-ordered umbrella data dealt different windows to the two halves,
+  so the filter regularised against their difference. It now passes the
+  (window, replicate) runs as `run_ids`. On a 2D umbrella benchmark with
+  exact weights the two fixes together take the transition RMSE from 0.029
+  to 0.009, the accuracy of unbiased sampling at the same budget. At the
+  paper's chignolin settings the held-out cap, read on the run-blocked
+  folds, selects the cone's `mu = 0.6` instead of 0.5.
+- A slice whose 1D solve is not finite no longer turns the reported
+  `dirichlet_energy` and constraint checks into NaN; it contributes zeros,
+  as it already did to the evaluated committor.
+
+- The 1D slice problem was wrong on equal-count grids (`binning_method="quantile"`,
+  the default), in two ways.
+  - The state samples were binned by their relative position in the range of
+    the bin centres, as if the centres were evenly spaced, so the absorption
+    pinned each profile in the wrong place. Two fully separated states got a
+    slice fidelity of about 0.7 instead of 1, and single slices could have a
+    negative fidelity.
+  - Each row of the tridiagonal system divided both fluxes by the square of
+    the forward spacing. On a non-uniform grid that solves
+    `rho q'' = kappa [...]` instead of `(rho q')' = kappa [...]`; with equal-count
+    bins `rho_i ds_i` is constant, so between the states the profile came out
+    nearly linear in `s` instead of following `INT 1/rho`.
+
+  The state samples are now binned on the edges of the density's own
+  histogram, and the system is the conservative discretisation on the bin
+  centres: each node carries its bin's state masses, and neighbours are
+  coupled by the conductance `rho_{i+1/2} / (s_{i+1} - s_i)`. Every slice then
+  satisfies `INT rho_A q = INT rho_B (1 - q)` over its absorbing masses, and
+  with `boundary_quantile = 1` its fidelity lies in `[0, 1]`. Equal-width grids
+  change too, since the old binning spanned the bin centres instead of the
+  edges and could assign a state sample to the neighbouring bin. Fits with
+  quantile bins change materially. The golden references are re-frozen from
+  this version by `tests/golden/freeze_references.py`.
+- `SlicedCommittorResult.log_dirichlet` is the Dirichlet energy of the same
+  discrete functional, `log sum_i c_{i+1/2} (q_{i+1} - q_i)^2`; it feeds only
+  `summary()`.
+- The Ornstein-Uhlenbeck physics test compared the slice committor with an
+  `erf` profile (`q' ~ rho`) instead of the process's committor
+  (`q' ~ 1/rho`, an `erfi` profile) and passed only through the binning
+  error above. It now uses the closed form at the states' inner edges, for
+  both binning methods. New tests gate the slice fidelity, the discrete
+  balance and the profile between two separated states on both grids.
+
 ## [1.0.0] - 2026-09-09
 
 The first public release. The public surface is `sliced_committor.__all__`

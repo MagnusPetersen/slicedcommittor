@@ -136,7 +136,7 @@ rate = rate_from_profiles(pi, D_q, rho_A, rho_B, reduction="plateau", band=(0.3,
 
 | `reduction` | `nu_R` | its parameter | what it is |
 |---|---|---|---|
-| `"plateau"` (default) | median of `D_q pi` over `band` | `band=(0.3, 0.7)`, or `"auto"` | a robust location estimate of the constant, read away from the states where committor error inflates the flux; the published reduction |
+| `"plateau"` (default) | median of `D_q pi` over `band` | `band=(0.3, 0.7)`, or `"auto"` | a robust location estimate of the constant, read away from the states where committor error inflates the flux |
 | `"arithmetic"` | `int_0^1 D_q pi dq` | none | the Dirichlet form, the variational upper bound on the rate; `pi`-weighted, so the states dominate |
 | `"harmonic"` | (`k = 1 / MFPT`) | `window=(lo, hi)` | the exact mean first-passage time of the projected 1D diffusion; bottleneck-dominated |
 | `"local"` | `D_q(q*) pi(q*)` | `q_star=0.5` | the Berezhkovskii-Szabo single-surface reading |
@@ -145,6 +145,40 @@ Each reduction accepts only its own parameter and raises on a foreign one.
 All coincide for the exact committor. `band="auto"` locates the flattest
 band with `find_plateau` and warns when nothing is flat to tolerance;
 `plateau_ok` records it.
+
+## The band-free read-off
+
+The paper reads the flux without a band. Every function `f(q)` of a fitted
+committor is a trial function with the same level sets, and the
+variational principle minimised over all of them has a closed form,
+`nu = [int g(z)^2 / Phi(z) dz]^-1`: `Phi(z)` is the flux through the level
+set `q = z` and `g(z) = P_B(q > z) - P_A(q > z)` how well that level
+separates the labelled states. For the exact committor `nu` is the reactive
+flux, under any monotone recalibration; for a fit it is the variational
+upper bound over the fit's reparametrisations, so it never exceeds the
+fit's own quotient. `variational_flux` takes the unclipped committor and
+its squared gradient at the samples:
+
+```python
+import numpy as np
+
+from sliced_committor import build_committor, committor_gradient, fit_committor, variational_flux
+
+_, fit = fit_committor(samples, in_A=in_A, in_B=in_B, n_directions=64, return_details=True)
+q_raw = build_committor(fit.result, fit.weights, clip=False)  # the read-off wants the unclipped sum
+u = np.asarray(q_raw(samples))
+grad_sq = np.sum(np.asarray(committor_gradient(q_raw, samples)) ** 2, axis=1)
+ro = variational_flux(u, grad_sq, in_A=in_A, in_B=in_B)
+nu_R = 0.05 * ro["nu"]  # the flux for a configurational diffusion D0 = 0.05
+print(ro["calibration_error"])  # E / nu - 1, a lower bound on the relative Dirichlet error
+```
+
+`calibration_error` is the part of the committor's error that a
+recalibration would remove; at unit fidelity it bounds the relative
+Dirichlet error from below. `q_tilde` is the optimal recalibration itself,
+and `flux` and `separation` are the two profiles per bin. With umbrella data,
+`umbrella.fit_and_rate(..., reductions=("variational",))` does the same and
+scales the flux by the `D0` of the CV-mapped route.
 
 ## In one call
 
@@ -179,8 +213,8 @@ the arithmetic one. `flatness` says the same thing on the flux profile:
 the flux of a good committor is flat across the transition region and
 inflates only in the states, where committor error dominates. A flux with
 no flat stretch means the committor is off, or the diffusion was measured
-where the coordinate is not diffusive (check `lag_scan`). The paper's
-label-free score `flux_cv` is the flatness on the fixed band `(0.2, 0.8)`,
+where the coordinate is not diffusive (check `lag_scan`). The umbrella
+bundle's label-free score `flux_cv` is the flatness on the fixed band `(0.2, 0.8)`,
 so that fits can be compared on one band:
 
 ```python

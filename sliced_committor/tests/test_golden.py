@@ -1,14 +1,21 @@
 """Frozen-reference gates: the numerics the published results depend on.
 
-Three reference files, all produced ONCE at tag ``v0.6.0`` by
-``golden/freeze_1_0_references.py`` (which cannot run against this version):
+Three reference files:
 
 * ``beta_invariance_golden.npz``: the slice basis on a 500-sample fixture.
 * ``ebmc_golden.npz``: the weight solve (``auto`` and ``halfset_eigen``), the
   committor at fixed points, and the held-out cap on that fixture.
-* ``halfset_reference.npz``: the eigenband regulariser against the numpy
-  prototype it was ported from, the Wolfe-Quapp sample generator, and a
+* ``halfset_reference.npz``: the eigenband regulariser against the filter
+  written from its definition, the Wolfe-Quapp sample generator, and a
   full Wolfe-Quapp fit (weights, committor on a grid, held-out cap).
+
+Everything that depends on the slice basis is frozen from this library by
+``golden/freeze_references.py``, which also reruns the weight path
+independently on the library's own slopes for the Wolfe-Quapp fit: the
+half-Grams of the numpy prototype the library was ported from, then the
+filter and the solve written from their definitions. The inputs of the
+regulariser cases, the Wolfe-Quapp samples and the fixture itself come from
+tag ``v0.6.0`` (``golden/freeze_1_0_references.py``, kept for provenance).
 
 Two tiers. The STRICT tier is the release gate: the half-set path, the
 paper's, bit for bit, the ``auto`` ridge and the basis to rounding. It holds
@@ -16,28 +23,27 @@ in the environment that produced the references, jax ``0.5.3``
 (``FROZEN_JAX``) on the machine that froze them, and only there: XLA
 compiles for the host CPU and the BLAS kernels are chosen by it and by the
 matrix size, so another machine rounds the last bit differently even with
-the same versions (a GitHub runner reproduced the 32-direction fixture bit
-for bit and the 64-direction Wolfe-Quapp solve at ``1e-3``). No probe can
+the same versions (an AVX-512 Xeon with jax 0.6.2 reproduces the half-set
+weights to ``3e-13``, not bit for bit). No probe can
 certify that in advance, so the strict tier is selected explicitly:
 ``SLICED_COMMITTOR_GOLDEN_TIER=strict`` on the freezing machine.
 
-By default, CI included, the DRIFT tier runs. Two mechanisms carry the last bit of
-rounding into the weights, neither of them a bug: a sample whose projection
-coincides with a grid point of its slice (quantile bins are built from the
-sample values, so duplicated frames put bin centres exactly on samples; the
-500-sample fixture has 40 duplicated rows) takes the slope of one adjacent
-bin or the other, which moves a few Gram entries by order one; and the
-half-set filter reads a band correlation off a nearly degenerate spectrum,
-which turns ``1e-13`` in the Gram into ``1e-3`` in individual weights.
-Measured between jax 0.5.3, 0.6.2 and 0.10.2 on one machine: the slice
-basis moves by ``1e-13``, the committor by up to ``1e-5`` (half-set) and
-``1e-3`` (scalar ridge, 500-sample fixture), energies and caps by ``1e-4``
-relative, individual weights by up to ``1e-2`` relative, and the noisy
-intermediates (band SSNR, per-fold caps) by a few percent. The drift tier
-therefore compares the outputs, the committor values, the half-set weights
-and the scalar summaries, with a margin of ten to a hundred over that, and
-leaves the ill-conditioned intermediates to the strict tier. CI runs the
-drift tier on the newest JAX and on the oldest supported one.
+By default, CI included, the DRIFT tier runs. One mechanism carries the last
+bit of rounding into the weights without being a bug: a sample whose
+projection coincides with a grid point of its slice (quantile bins are built
+from the sample values, so duplicated frames put bin centres exactly on
+samples; the 500-sample fixture has 40 duplicated rows) takes the slope of
+one adjacent bin or the other, which moves a few Gram entries by order one,
+under either rule; rounding decides, so it fires on some machines and not
+on others. Where it does not fire the path is stable: between jax 0.5.3,
+0.6.2 and 0.10.1 on the freezing machine, and with jax 0.6.2 on an AVX-512
+Xeon, the slice basis moves by ``1e-13``, the weights by ``3e-13``
+relative, the committor by ``2e-14`` and the energies, caps and band SSNR
+by ``2e-14`` relative or less. The drift tier compares the outputs, the
+committor values, the half-set weights and the scalar summaries, at
+tolerances set for that mechanism, and leaves the intermediates it moves
+most to the strict tier. CI runs the drift tier on the newest JAX and on the
+oldest supported one.
 """
 
 import os
@@ -187,12 +193,13 @@ def test_heldout_cap_matches_golden(basis, check):
 
 
 # --------------------------------------------------------------------------- #
-# the eigenband regulariser against the prototype it was ported from
+# the eigenband regulariser against its definition
 # --------------------------------------------------------------------------- #
 def test_eigenband_regulariser_matches_reference(check):
-    """numpy and scipy only, on stored matrices; what moves between machines here
-    is LAPACK's rounding of a nearly degenerate spectrum (4.6e-4 relative on
-    a GitHub runner), amplified by the band inflation."""
+    """numpy and scipy only, on stored matrices, against the filter written
+    from its definition (``freeze_references.FILTER_SPEC``). The band
+    statistic depends only on each band's eigenspace, so what can move
+    between machines is a nearly degenerate pair straddling a band edge."""
     h = _load("halfset_reference.npz")
     for M, nb, seed in h["spd_cases"]:
         k = f"spd::{M}_{nb}_{seed}"

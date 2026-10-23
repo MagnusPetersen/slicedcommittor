@@ -60,6 +60,7 @@ from .rates import (
     pooled_acf_diffusion,
     rate_from_profiles,
     value_at,
+    variational_flux,
 )
 
 __all__ = [
@@ -99,6 +100,7 @@ __all__ = [
     "linear_response_grad_sq",
     "committor_rate",
     "rate_from_profiles",
+    "variational_flux",
     "Profile",
     "value_at",
     "flux_flatness",

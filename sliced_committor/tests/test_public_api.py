@@ -40,6 +40,7 @@ EXPECTED = sorted(
         "linear_response_grad_sq",
         "committor_rate",
         "rate_from_profiles",
+        "variational_flux",
         "Profile",
         "value_at",
         "flux_flatness",

@@ -57,6 +57,15 @@ conditions: $q_j$ is exactly 0 and 1 only on the shadows of the states along
 its own direction, and the shadows of $A$ and $B$ overlap wherever the
 direction does not separate them. The weights repair this in the aggregate.
 
+The reaction strength is a property of the trial space, not of the
+principle. Large (the default), it pins each profile across the states'
+shadows, which makes the basin averages an exact stand-in for the boundary
+values wherever the shadows are disjoint; as $\kappa \to 0$ the profile tends to
+$q_j' \propto (C_A - C_B)/\rho_j$, with $C_A, C_B$ the states' cumulative
+distributions along the slice, the profile that maximises the slice's own
+quotient $(\mathbb{E}_B[q_j] - \mathbb{E}_A[q_j])^2 / \int \rho_j q_j'^2$
+(`rd_stiffness`, [settings](settings.md)).
+
 ## The weights
 
 With the Gram matrix
@@ -97,16 +106,23 @@ noise is not the same across the spectrum. The library's default, the
 half-set spectral filter (`tikhonov="halfset_eigen"`), deals the frames
 into ten contiguous, basin-stratified folds, assembles a Gram matrix from
 the even folds and one from the odd folds, and compares the two in the
-eigenbasis of their mean, band by band (twelve bands). The correlation $c$
-of a band between the halves is read as a signal-to-noise ratio
-$\mathrm{SNR} = 2c / (1 - c)$, and the band's eigenvalues are inflated by
-$1 + 1/\mathrm{SNR}$: bands the halves agree on are left alone, bands they
-disagree on are damped in proportion. The filter has no constant and
+eigenbasis of their mean, band by band (twelve bands). The correlation
+$c$ of a band between the halves is uncentred,
+$\sum v_1 v_2 / (\sum v_1^2 \sum v_2^2)^{1/2}$ over the band's rows, so it
+does not depend on the signs the eigensolver gives the eigenvectors; it is
+read as a signal-to-noise ratio $\mathrm{SNR} = 2c / (1 - c)$, and the
+band's eigenvalues are inflated by $1 + 1/\mathrm{SNR}$: bands the halves
+agree on are left alone, bands they disagree on are damped in proportion.
+The solve applies the filtered inverse in that eigenbasis instead of
+factorising the filtered matrix, in which the damped bands, inflated by up
+to $10^{12}$, would round onto the others. The filter has no constant and
 nothing to select, which is why it is the paper's universal setting. It
 needs the frames in time order; a permutation of the frames destroys the
 independence of the two halves and reports the noise as smaller than it
-is. `tikhonov="auto"` (a closed-form scalar ridge) and an absolute ridge
-exist for controlled comparisons ([settings](settings.md)).
+is, and frames from several runs (umbrella windows, replicates) need
+`run_ids`, so that each half takes a share of every run instead of half of
+the runs. `tikhonov="auto"` (a closed-form scalar ridge) and an absolute
+ridge exist for controlled comparisons ([settings](settings.md)).
 
 ## The held-out cap
 
