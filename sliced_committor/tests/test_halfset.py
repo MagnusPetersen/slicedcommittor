@@ -74,3 +74,27 @@ def test_regularized_gram_embeds_identity_rows_for_invalid_directions():
     np.testing.assert_array_equal(R[np.ix_(iv, iv)], R_v)
     for j in np.flatnonzero(~valid):
         assert R[j, j] == 1.0 and np.all(R[j, np.arange(6) != j] == 0.0)
+
+
+def test_run_strata_give_every_fold_a_contiguous_share_of_every_run():
+    """Window-ordered frames: without runs a fold covers a few windows; with
+    ``run_ids`` every fold takes a contiguous block of every window."""
+    n_win, n_per = 6, 200
+    run = np.repeat(np.arange(n_win), n_per)
+    in_A = np.zeros(run.size, bool)
+    in_B = np.zeros(run.size, bool)
+    in_A[:50], in_B[-50:] = True, True
+    plain = hs.make_folds(run.size, 10, strata=hs.basin_strata(in_A, in_B))
+    by_run = hs.make_folds(run.size, 10, strata=hs.basin_strata(in_A, in_B, run))
+    trans = ~in_A & ~in_B
+    assert min(len(set(run[(plain == k) & trans])) for k in range(10)) == 1  # the confound
+    for k in range(10):
+        assert set(run[(by_run == k) & ~in_A & ~in_B]) == set(range(n_win))
+    for r in range(n_win):
+        f = by_run[(run == r) & ~in_A & ~in_B]
+        assert np.all(np.diff(f) >= 0), "blocks stay contiguous in time within a run"
+
+
+def test_basin_strata_reject_misaligned_runs():
+    with pytest.raises(ValueError, match="one entry per frame"):
+        hs.basin_strata(np.zeros(4, bool), np.zeros(4, bool), np.zeros(3))

@@ -44,11 +44,12 @@ def slice_values(result, batch_size: int = BATCH):
     bootstrap materialises the tuple once and reuses it.
     """
     M = result.projected_samples.shape[0]
+    q1d = jnp.where(jnp.isnan(result.committors_1d), 0.0, result.committors_1d)
     for start in range(0, M, batch_size):
         size = min(batch_size, M - start)
         yield _interpolate(
             result.slice_coords[start : start + size],
-            result.committors_1d[start : start + size],
+            q1d[start : start + size],
             result.projected_samples,
             start,
             size,

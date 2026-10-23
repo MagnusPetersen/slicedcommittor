@@ -73,6 +73,39 @@ features), and 1.0 on chignolin and in 2D. Too low a value moves the
 boundary into the state, which shows up as a growing boundary error, so
 scan it against `boundary_errors` and the held-out cap.
 
+## The slice profile: `rd_kappa` and `rd_stiffness`
+
+Each slice minimises `INT rho q'^2 + kappa (INT rho_A q^2 + INT rho_B (1-q)^2)`.
+The default `rd_kappa = 1e12` is a hard wall: the profile is pinned to 0
+across the whole shadow of A and to 1 across that of B, which makes the
+basin moments the weights are solved against exactly the fidelity the
+variational principle needs, on every slice whose shadows are disjoint.
+Where the shadows overlap the pinned profile is the classifier
+`rho_B / (rho_A + rho_B)` and does not read the density at all.
+
+`rd_stiffness` sets the wall in units that mean the same on every slice,
+`kappa~ = kappa p_max sigma^2` (`p_max` and `sigma` the peak and spread of
+the slice's density): the wall then reaches about `sigma sqrt(P / kappa~)`
+into a state of probability `P`. `rd_stiffness=0` is the limit
+`kappa -> 0` in closed form, `q' ~ (C_A - C_B) / rho` with `C_A`, `C_B`
+the states' cumulative distributions along the slice: the profile that
+maximises the slice's own fidelity-to-energy quotient.
+
+```python
+from sliced_committor import compute_sliced_committor
+
+soft = compute_sliced_committor(samples, in_A=in_A, in_B=in_B, n_directions=32, rd_stiffness=1e4)
+```
+
+A softer wall gives a better-shaped basis where the shadows overlap, but
+the profile then varies inside the states, and the basin moments start to
+overstate the fidelity. The energy, the held-out cap and the calibration
+error all read the fidelity through those moments, so they prefer the
+softest wall on every system and cannot choose it. On data with
+transitions, read the fidelity off the reactive segments instead (the mean
+increment of the fit from the last frame in one state to the first frame
+in the other): a soft wall is safe where it stays at one.
+
 ## Directions: `n_directions` and the cone
 
 `n_directions` is the size of the trial space. The cost of the fit is linear
@@ -146,13 +179,29 @@ which means no combination of the slices separates the states; pass
 `raise_on_degenerate=False` to get the degenerate weights back with
 `weights.cond` as the flag.
 
-## Sample weights
+## Sample weights and runs
 
 A biased ensemble enters through `sample_weights`, one weight per frame,
-summing to one (the solve refuses anything else). The weights are used
-verbatim in the Gram matrix and the density, so the Dirichlet energies of
-fits are comparable only for the same weights. The basin moments are
-unweighted averages over the labelled frames.
+summing to one (the solve refuses anything else). Every slice's density and
+state masses are then the weighted histograms, and the Gram matrix is the
+weighted average, so the Dirichlet energies of fits are comparable only for
+the same weights. The basin moments are plain averages over the labelled
+frames.
+
+Frames that come from several runs (umbrella windows, replicates started
+from different structures) need `run_ids`, one label per frame, in
+`fit_committor` or `solve_weights`. The half-set filter compares two halves
+of the frames and reads their disagreement as noise; with `run_ids` each
+half takes a contiguous share of every run, otherwise frames of different
+ensembles can fall on opposite sides and the filter regularises against
+their difference. `umbrella.fit_and_rate` passes its windows and replicates
+on its own.
+
+```python
+from sliced_committor import fit_committor
+
+q = fit_committor(samples, in_A=in_A, in_B=in_B, n_directions=32, run_ids=run_ids)
+```
 
 ## Choosing settings without a reference
 

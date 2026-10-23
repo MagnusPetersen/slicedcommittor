@@ -184,6 +184,31 @@ def _combine(q_all, w, c, valid_mask, original_shape):
 # =============================================================================
 
 
+def _weighted_bin_density(bin_idx, weights, ds, n_bins, n_min, density_floor, nominal_count=None):
+    """The density of a weighted ensemble on fixed bins, floored like the unweighted one.
+
+    A bin's mass is the summed weight of its samples. Bins with fewer than
+    ``n_min`` samples are floored at ``n_min`` samples of their own mean weight
+    (an empty bin borrows the mean weight of the nearest non-empty bin), so
+    uniform weights ``1/N`` reproduce the unweighted floor ``n_min / (N ds)``.
+    ``nominal_count`` is the exact-quantile convention: every bin is taken to
+    hold that many samples, now at its own mean weight.
+    """
+    counts = jnp.zeros(n_bins).at[bin_idx].add(1.0)
+    mass = jnp.zeros(n_bins).at[bin_idx].add(weights)
+    ar = jnp.arange(n_bins)
+    nonempty = counts > 0
+    left = lax.cummax(jnp.where(nonempty, ar, -1))
+    right = lax.cummin(jnp.where(nonempty, ar, n_bins), reverse=True)
+    use_left = (left >= 0) & ((right >= n_bins) | (ar - left <= right - ar))
+    nearest = jnp.clip(jnp.where(use_left, left, right), 0, n_bins - 1)
+    mean_w = jnp.where(nonempty, mass / jnp.maximum(counts, 1.0), 0.0)
+    mean_w = jnp.where(nonempty, mean_w, mean_w[nearest])
+    if nominal_count is not None:
+        mass = nominal_count * mean_w
+    return jnp.maximum(jnp.maximum(mass, n_min * mean_w) / ds, density_floor)
+
+
 @partial(
     jit,
     static_argnames=(
@@ -204,6 +229,7 @@ def compute_1d_free_energy(
     s_subsample=None,
     use_subsample_quantile=False,
     return_edges=False,
+    weights=None,
 ):
     """``-log rho(s)`` along one slice from the projected samples.
 
@@ -212,7 +238,9 @@ def compute_1d_free_energy(
     hold equal counts, ``equal_width`` bins are uniform in ``s``. Every bin
     density is floored at ``max(n_min / (N ds), density_floor)`` so that tail
     bins with a handful of samples cannot produce arbitrarily high free
-    energies.
+    energies. With ``weights`` (``(N,)``, summing to one) the density is the
+    weighted histogram on the same bins, floored at ``n_min`` samples of each
+    bin's mean weight, which uniform weights reduce to the unweighted case.
     """
     s = s_projected
     s_min, s_max = jnp.min(s), jnp.max(s)
@@ -228,23 +256,40 @@ def compute_1d_free_energy(
         s_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
         ds_per_bin = jnp.maximum(bin_edges[1:] - bin_edges[:-1], 1e-10)
         N_total = s.shape[0]
-        if use_subsample_quantile:
+        if weights is not None:
             bin_idx = jnp.clip(jnp.searchsorted(bin_edges[1:-1], s), 0, n_bins - 1)
-            counts = jnp.zeros(n_bins).at[bin_idx].add(jnp.ones(N_total))
+            density = _weighted_bin_density(
+                bin_idx,
+                weights,
+                ds_per_bin,
+                n_bins,
+                n_min,
+                density_floor,
+                nominal_count=None if use_subsample_quantile else N_total / n_bins,
+            )
         else:
-            counts = N_total / n_bins
-        N = jnp.float64(N_total)
-        effective_floor = jnp.maximum(n_min / (N * ds_per_bin), density_floor)
-        density = jnp.maximum(counts / (N * ds_per_bin), effective_floor)
+            if use_subsample_quantile:
+                bin_idx = jnp.clip(jnp.searchsorted(bin_edges[1:-1], s), 0, n_bins - 1)
+                counts = jnp.zeros(n_bins).at[bin_idx].add(jnp.ones(N_total))
+            else:
+                counts = N_total / n_bins
+            N = jnp.float64(N_total)
+            effective_floor = jnp.maximum(n_min / (N * ds_per_bin), density_floor)
+            density = jnp.maximum(counts / (N * ds_per_bin), effective_floor)
     else:
         bin_edges = jnp.linspace(s_min, s_max, n_bins + 1)
         s_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
         idx = jnp.clip(jnp.floor((s - s_min) / span * n_bins).astype(jnp.int32), 0, n_bins - 1)
-        counts = jnp.bincount(idx, length=n_bins)
-        N = jnp.maximum(jnp.sum(counts), 1.0)
         bin_width = span / n_bins
-        effective_floor = jnp.maximum(n_min / (N * bin_width), density_floor)
-        density = jnp.maximum(counts / (N * bin_width), effective_floor)
+        if weights is not None:
+            density = _weighted_bin_density(
+                idx, weights, jnp.full(n_bins, bin_width), n_bins, n_min, density_floor
+            )
+        else:
+            counts = jnp.bincount(idx, length=n_bins)
+            N = jnp.maximum(jnp.sum(counts), 1.0)
+            effective_floor = jnp.maximum(n_min / (N * bin_width), density_floor)
+            density = jnp.maximum(counts / (N * bin_width), effective_floor)
 
     F_values = -jnp.log(density)
     F_values = F_values - jnp.min(F_values)
@@ -320,6 +365,9 @@ def compute_1d_rd_committor(
     boundary_quantile,
     s_A_sorted,
     s_B_sorted,
+    W_A=None,
+    W_B=None,
+    stiffness=None,
 ):
     """The 1D reaction-diffusion committor on one slice (Thomas algorithm).
 
@@ -339,19 +387,33 @@ def compute_1d_rd_committor(
     gives ``INT rho_A q = INT rho_B (1 - q)`` over the absorbing masses. With
     ``boundary_quantile = 1`` those are all of each state's samples, so the
     slice fidelity ``INT rho_B q - INT rho_A q`` lies in ``[0, 1]``; below 1 the
-    balance leaves out the state mass past the cut.
+    balance leaves out the state mass past the cut. ``W_A``, ``W_B`` weight
+    the state masses (a biased ensemble's equilibrium weights).
+
+    ``stiffness`` replaces the absolute ``rd_kappa`` by the dimensionless
+    ``kappa~ = kappa p_max sigma^2`` of the slice (``p_max`` and ``sigma`` the
+    peak and the spread of its probability density), so that the absorbing
+    wall penetrates about ``sigma sqrt(P_state / kappa~)`` into a state on
+    every slice alike. ``stiffness = 0`` is the ``kappa -> 0`` limit in closed
+    form: the flux through interface ``i + 1/2`` is ``C_A(i) - C_B(i)``, the
+    difference of the state CDFs, i.e. ``q' ~ (C_A - C_B) / rho``, the
+    maximiser of the slice's own quotient
+    ``(INT rho_B q - INT rho_A q)^2 / INT rho q'^2``, rescaled to ``[0, 1]``.
     """
     n = s_values.shape[0]
     rho = jnp.exp(-(F_values - jnp.min(F_values)))
     inner_edges = bin_edges[1:-1]
 
-    def _state_mass(s_proj_state):
+    def _state_mass(s_proj_state, W_state):
         idx = jnp.clip(jnp.searchsorted(inner_edges, s_proj_state), 0, n - 1)
-        hist = jnp.zeros(n).at[idx].add(1.0)
-        return hist / max(s_proj_state.shape[0], 1)
+        if W_state is None:
+            hist = jnp.zeros(n).at[idx].add(1.0)
+            return hist / max(s_proj_state.shape[0], 1)
+        hist = jnp.zeros(n).at[idx].add(W_state)
+        return hist / jnp.maximum(jnp.sum(W_state), 1e-300)
 
-    m_A = _state_mass(s_A_proj)
-    m_B = _state_mass(s_B_proj)
+    m_A = _state_mass(s_A_proj, W_A)
+    m_B = _state_mass(s_B_proj, W_B)
 
     if boundary_quantile < 1.0:
         A_is_left = jnp.mean(s_A_proj) < jnp.mean(s_B_proj)
@@ -362,13 +424,29 @@ def compute_1d_rd_committor(
             _absorption_keep_mask(s_values, s_B_sorted, ~A_is_left, boundary_quantile), m_B, 0.0
         )
 
-    # Tridiagonal system: row i is sub_i q_{i-1} + diag_i q_i + sup_i q_{i+1} = rhs_i.
     rho_half = 0.5 * (rho[:-1] + rho[1:])
     conductance = rho_half / jnp.maximum(jnp.diff(s_values), 1e-10)
+
+    if stiffness == 0.0:
+        mA = m_A / jnp.maximum(jnp.sum(m_A), 1e-300)
+        mB = m_B / jnp.maximum(jnp.sum(m_B), 1e-300)
+        q = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.cumsum(mA - mB)[:-1] / conductance)])
+        lo, span = jnp.min(q), jnp.max(q) - jnp.min(q)
+        return jnp.where(span > 0, (q - lo) / jnp.where(span > 0, span, 1.0), 0.5)
+    if stiffness is None:
+        kappa = rd_kappa
+    else:
+        h = jnp.maximum(bin_edges[1:] - bin_edges[:-1], 1e-12)
+        p = rho / jnp.sum(rho * h)
+        mean = jnp.sum(p * h * s_values)
+        var = jnp.maximum(jnp.sum(p * h * (s_values - mean) ** 2), 1e-300)
+        kappa = stiffness / (jnp.max(p) * var)
+
+    # Tridiagonal system: row i is sub_i q_{i-1} + diag_i q_i + sup_i q_{i+1} = rhs_i.
     sub = jnp.concatenate([jnp.zeros(1), conductance])
     sup = jnp.concatenate([conductance, jnp.zeros(1)])
-    diag = -(sub + sup) - rd_kappa * (m_A + m_B)
-    rhs = -rd_kappa * m_B
+    diag = -(sub + sup) - kappa * (m_A + m_B)
+    rhs = -kappa * m_B
 
     # Thomas algorithm with scalar carries.
     b0 = jnp.where(jnp.abs(diag[0]) > 1e-30, diag[0], 1e-30)
@@ -423,12 +501,13 @@ def _compute_log_dirichlet(s_vals, F_vals, q_vals):
 
 class _SliceInputs(NamedTuple):
     """The arrays every slice reads: the samples, the basin index sets, the
-    basin sample weights with their sums (None for uniform weights), and the
-    quantile subsample index (None below the size threshold)."""
+    sample weights with the basin subsets and their sums (None for uniform
+    weights), and the quantile subsample index (None below the size threshold)."""
 
     samples: jnp.ndarray
     A_indices: jnp.ndarray
     B_indices: jnp.ndarray
+    W: jnp.ndarray | None
     W_A: jnp.ndarray | None
     W_B: jnp.ndarray | None
     sumWA: jnp.ndarray | None
@@ -446,6 +525,7 @@ class _SliceSettings(NamedTuple):
     rd_kappa: float
     boundary_quantile: float
     use_subsample: bool
+    rd_stiffness: float | None
 
 
 @partial(jit, static_argnames=("settings",))
@@ -468,6 +548,7 @@ def _slices(directions, inputs: _SliceInputs, settings: _SliceSettings):
             s_subsample=s_sub,
             use_subsample_quantile=settings.use_subsample,
             return_edges=True,
+            weights=inputs.W,
         )
         s_A = s_projected[inputs.A_indices]
         s_B = s_projected[inputs.B_indices]
@@ -486,6 +567,9 @@ def _slices(directions, inputs: _SliceInputs, settings: _SliceSettings):
             boundary_quantile=settings.boundary_quantile,
             s_A_sorted=s_A_sorted,
             s_B_sorted=s_B_sorted,
+            W_A=inputs.W_A,
+            W_B=inputs.W_B,
+            stiffness=settings.rd_stiffness,
         )
         is_valid = jnp.all(jnp.isfinite(q_rd))
         log_D = jnp.where(is_valid, _compute_log_dirichlet(s_vals, F_vals, q_rd), jnp.inf)
@@ -524,6 +608,7 @@ def compute_sliced_committor(
     density_floor: float = 1e-6,
     n_min: int = 10,
     rd_kappa: float = 1e12,
+    rd_stiffness: float | None = None,
     boundary_quantile: float = 1.0,
     direction_batch_size: int | None = None,
     sample_weights=None,
@@ -544,7 +629,17 @@ def compute_sliced_committor(
         density_floor: static floor on the 1D density.
         n_min: adaptive floor ``n_min / (N ds)`` on the 1D density.
         rd_kappa: absorption strength of the RD problem (large = hard
-            absorption inside the basins).
+            absorption inside the basins), in the units of the slice's
+            ``rho / max(rho)``; ignored when ``rd_stiffness`` is given.
+        rd_stiffness: the absorption as the dimensionless ``kappa~ = kappa
+            p_max sigma^2`` of each slice (``p_max``, ``sigma``: peak and
+            spread of its probability density), which means the same on every
+            slice and system; ``0`` is the ``kappa -> 0`` limit in closed form,
+            the profile ``q' ~ (C_A - C_B) / rho`` that maximises the slice's
+            own fidelity-to-energy quotient. None (default) uses ``rd_kappa``.
+            A soft wall gives a better-shaped basis but lets the profile vary
+            inside the states, which biases the basin-moment fidelity the
+            weights are solved against; see the settings page before using it.
         boundary_quantile: inner basin edges at this quantile of the state
             projections (1 = the extremes). Below 1 the absorption density is
             truncated past the same quantile, which suppresses the halo that
@@ -552,8 +647,11 @@ def compute_sliced_committor(
         direction_batch_size: process the directions in batches of this size
             to bound the ``(batch, N)`` working memory; None = one vmap.
         sample_weights: ``(N,)`` reweighting (e.g. MBAR) summing to one; None
-            = uniform. The weights are used verbatim, so the reported
-            Dirichlet energies of fits are comparable only on that scale.
+            = uniform. Each slice's density and state masses are the weighted
+            histograms, and the weight solve averages its Gram with them; the
+            basin moments stay plain averages over the labelled frames. The
+            weights are used verbatim, so the reported Dirichlet energies of
+            fits are comparable only on that scale.
         directions: ``(M, dim)`` pre-supplied directions; overrides the draw.
         direction_sampling: :class:`DirectionSamplingConfig` for the LDA cone
             (``mode='lda'``); None or ``mode='uniform'`` draws uniformly.
@@ -598,6 +696,10 @@ def compute_sliced_committor(
         )
     if not (0.0 < boundary_quantile <= 1.0):
         raise ValueError(f"boundary_quantile must be in (0, 1]; got {boundary_quantile}")
+    if rd_stiffness is not None:
+        rd_stiffness = float(rd_stiffness)
+        if not (rd_stiffness >= 0.0 and rd_stiffness < float("inf")):
+            raise ValueError(f"rd_stiffness must be finite and >= 0; got {rd_stiffness}")
     if dim > n_samples_total:
         warnings.warn(
             f"samples.shape={samples.shape}: dim ({dim}) exceeds N ({n_samples_total}). "
@@ -663,9 +765,18 @@ def compute_sliced_committor(
     else:
         subsample_idx = None
 
-    inputs = _SliceInputs(samples, A_indices, B_indices, W_A, W_B, sumWA, sumWB, subsample_idx)
+    inputs = _SliceInputs(
+        samples, A_indices, B_indices, sample_weights, W_A, W_B, sumWA, sumWB, subsample_idx
+    )
     settings = _SliceSettings(
-        n_bins, binning_method, density_floor, n_min, rd_kappa, boundary_quantile, use_subsample
+        n_bins,
+        binning_method,
+        density_floor,
+        n_min,
+        rd_kappa,
+        boundary_quantile,
+        use_subsample,
+        rd_stiffness,
     )
     if direction_batch_size is None or direction_batch_size >= n_directions:
         out = _slices(directions, inputs, settings)

@@ -14,7 +14,9 @@ Two facts are load-bearing and encoded here rather than left to the caller:
   built from CONTIGUOUS blocks, dealt alternately; a random frame split puts
   near-duplicates on both sides and reports the noise as smaller than it is.
   ``make_folds`` blocks within each basin stratum so every fold holds samples
-  of both basins.
+  of both basins, and within each run when the frames come from several
+  (umbrella windows, replicates): blocks cut across runs would deal different
+  ensembles to the two halves, and their difference would read as noise.
 * The sampling noise of ``G`` is diagonal in the eigenbasis of ``G`` and not
   in any a-priori slice-property basis; that is why the bands are eigenbands.
 
@@ -47,11 +49,24 @@ def make_folds(N: int, n_folds: int, *, strata=None):
     return out
 
 
-def basin_strata(in_A, in_B):
-    """0 = A, 1 = B, 2 = transition; the stratification every fold uses."""
+def basin_strata(in_A, in_B, run_ids=None):
+    """0 = A, 1 = B, 2 = transition, crossed with the run of every frame when
+    ``run_ids`` are given; the stratification every fold uses.
+
+    Frames of different runs (umbrella windows, replicates started from
+    different states) sample different ensembles. Blocking within each run
+    gives every fold a contiguous share of every run, so the two halves see
+    the same ensembles and differ only by sampling noise.
+    """
     in_A = np.asarray(in_A, bool)
     in_B = np.asarray(in_B, bool)
-    return np.where(in_A, 0, np.where(in_B, 1, 2))
+    strata = np.where(in_A, 0, np.where(in_B, 1, 2))
+    if run_ids is None:
+        return strata
+    runs = np.unique(np.asarray(run_ids).reshape(-1), return_inverse=True)[1].reshape(-1)
+    if runs.shape != strata.shape:
+        raise ValueError(f"run_ids must have one entry per frame ({strata.size}); got {runs.size}")
+    return runs * 3 + strata
 
 
 def fold_gram_blocks(F, W, cos_matrix, fold_of, n_folds):

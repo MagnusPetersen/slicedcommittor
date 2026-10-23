@@ -37,6 +37,7 @@ from typing import Any
 
 import numpy as np
 
+from .._runs import segment_ids
 from ..core.committor import build_committor, fit_committor
 from ..rates import (
     Profile,
@@ -162,7 +163,8 @@ def fit_and_rate(
             windows (call that yourself to select windows).
         run_ids: ``(N,)`` labels of independent contiguous runs (replicates),
             which no diffusion estimator reads across; None when every window
-            is one run.
+            is one run. The committor's half-set folds are blocked within every
+            (window, run) stretch.
         diffusion: which constructors of ``D_q`` to run, from
             ``("cvmap", "hummer_q", "km_q")``.
         reductions: which reductions to report, from ``("plateau",
@@ -213,6 +215,10 @@ def fit_and_rate(
         "sample_weights": sw,
         **solver_kwargs,
     }
+    # every umbrella window (and replicate) is its own ensemble: the half-set
+    # folds take a contiguous share of each, so the two halves sample them alike
+    wid = np.asarray(dataset.window_ids)
+    runs = segment_ids(wid) if run_ids is None else segment_ids(wid, run_ids)
     q, detail = fit_committor(
         X,
         in_A=in_A,
@@ -220,6 +226,7 @@ def fit_and_rate(
         n_directions=n_directions,
         seed=seed,
         tikhonov=tikhonov,
+        run_ids=runs,
         return_details=True,
         **solver,
     )
@@ -245,7 +252,6 @@ def fit_and_rate(
     # one autodiff pass gives the per-sample committor AND its squared gradient
     qv, grad_sq = _values_and_grad_sq(q, X, bridge_metric)
     out["q_samples"] = qv
-    wid = np.asarray(dataset.window_ids)
     dt = float(dataset.dt)
     s = progress_coordinate(dataset)
 

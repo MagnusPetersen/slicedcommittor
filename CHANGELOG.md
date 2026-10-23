@@ -22,8 +22,34 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   that way on the unclipped committor and scales the flux by the
   configurational `D0` of the `"cvmap"` route (`readoff_bins=100`); the
   read-off's per-bin profiles land under `profiles["readoff"]`.
+- `run_ids=` in `solve_weights` and `fit_committor` blocks the half-set (and
+  held-out-cap) folds within every run, so both halves sample every run;
+  `bootstrap_weights` passes its `run_ids` on to the replicate solves.
+- `rd_stiffness=` in `compute_sliced_committor`: the slice absorption as the
+  dimensionless `kappa~ = kappa p_max sigma^2` of each slice, with
+  `rd_stiffness=0` the `kappa -> 0` limit in closed form,
+  `q' ~ (C_A - C_B) / rho`. The default stays the absolute `rd_kappa`.
 
 ### Fixed
+
+- Sample weights never reached the slices: each slice's density and state
+  masses were unweighted histograms of a biased ensemble, and the weights
+  entered only the Gram matrix and `boundary_errors`. They are now the
+  weighted histograms (uniform weights reproduce the unweighted slices to
+  rounding). Weighted fits change: at the paper's chignolin settings the
+  folding rate moves from 2.46 to 2.81 per µs and the unfolding rate from
+  0.668 to 0.711 per µs, nearly all of it through the state masses (every
+  chignolin slice overlaps its states, so its pinned profile never reads the
+  density).
+- `umbrella.fit_and_rate` cut the half-set folds in array order, which for
+  window-ordered umbrella data dealt different windows to the two halves,
+  so the filter regularised against their difference. It now passes the
+  (window, replicate) runs as `run_ids`. On a 2D umbrella benchmark with
+  exact weights the two fixes together take the transition RMSE from 0.029
+  to 0.009, the accuracy of unbiased sampling at the same budget.
+- A slice whose 1D solve is not finite no longer turns the reported
+  `dirichlet_energy` and constraint checks into NaN; it contributes zeros,
+  as it already did to the evaluated committor.
 
 - The 1D slice problem was wrong on equal-count grids (`binning_method="quantile"`,
   the default), in two ways.

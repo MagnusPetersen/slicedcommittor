@@ -212,12 +212,15 @@ def _slopes(slice_coords, committors_1d, projected_samples, start, size):
 
 def _basis(result, batch_size: int = BATCH):
     """The slopes assembled in direction batches (the bin search of a block is
-    the transient, not that of all ``M`` directions) and the cosine matrix."""
+    the transient, not that of all ``M`` directions) and the cosine matrix.
+    A non-finite slice contributes zero slopes, as it contributes zero values
+    to the evaluated committor, so the energies stay finite."""
     M = result.projected_samples.shape[0]
+    q1d = _basis_1d(result).committors_1d
     blocks = [
         _slopes(
             result.slice_coords[start : start + min(batch_size, M - start)],
-            result.committors_1d[start : start + min(batch_size, M - start)],
+            q1d[start : start + min(batch_size, M - start)],
             result.projected_samples,
             start,
             min(batch_size, M - start),
@@ -247,7 +250,13 @@ def _sample_weights(result, counts=None):
 
 
 def solve_weights(
-    result, *, tikhonov="halfset_eigen", heldout_cap=False, raise_on_degenerate=True, counts=None
+    result,
+    *,
+    tikhonov="halfset_eigen",
+    heldout_cap=False,
+    raise_on_degenerate=True,
+    counts=None,
+    run_ids=None,
 ):
     """Solve the slice weights of a :class:`~sliced_committor.SlicedCommittorResult`.
 
@@ -267,6 +276,12 @@ def solve_weights(
             moment gap collapses (``cond < 1e-6``) instead of returning weights.
         counts: ``(N,)`` frame multiplicities of a bootstrap replicate
             (:func:`bootstrap_weights`); None means every frame once.
+        run_ids: ``(N,)`` labels of the contiguous runs the frames come from
+            (umbrella windows, replicates). The half-set folds and the held-out
+            cap's folds are then blocked within every run, so both halves
+            sample every run; without it frames from different ensembles can
+            fall on opposite sides and the filter mistakes their difference
+            for noise. None treats the frames as one time-ordered run.
 
     Returns:
         :class:`Weights`.
@@ -284,10 +299,13 @@ def solve_weights(
         heldout_cap=heldout_cap,
         raise_on_degenerate=raise_on_degenerate,
         counts=counts,
+        run_ids=run_ids,
     )
 
 
-def _solve_prepared(result, basis, chunks, *, tikhonov, heldout_cap, raise_on_degenerate, counts):
+def _solve_prepared(
+    result, basis, chunks, *, tikhonov, heldout_cap, raise_on_degenerate, counts, run_ids=None
+):
     """The solve on a prepared basis; ``chunks`` streams the slice committors at the samples."""
     rule = _rule(tikhonov)
     valid_mask = jnp.asarray(result.valid_mask, bool)
@@ -307,7 +325,7 @@ def _solve_prepared(result, basis, chunks, *, tikhonov, heldout_cap, raise_on_de
 
     fold_of = None
     if rule == "halfset_eigen":
-        strata = hs.basin_strata(result.in_A, result.in_B)
+        strata = hs.basin_strata(result.in_A, result.in_B, run_ids)
         fold_of = hs.make_folds(int(W.shape[0]), hs.N_FOLDS, strata=strata)
     moments = basin_moments(result, chunks, counts=counts, fold_of=fold_of if heldout_cap else None)
     a, b = moments.a, moments.b
@@ -448,8 +466,9 @@ def bootstrap_weights(
     (never across ``run_ids`` boundaries, so independent trajectories are never
     spliced), the resampled frame multiplicities reweight the Gram and the
     basin moments, and the solve is re-run with the same ``tikhonov`` rule the
-    fit used. Everything that does not depend on the multiplicities is built
-    once, so the replicates cost one Gram assembly and one small solve each:
+    fit used, its half-set folds blocked within the same runs. Everything that
+    does not depend on the multiplicities is built once, so the replicates
+    cost one Gram assembly and one small solve each:
     the slice slopes and the slice committors at the samples stay resident
     (two ``(M, N)`` float64 arrays), and with ``points`` (optional, ``(P,
     dim)``) the ``(M, P)`` slice committors there, from which each replicate's
@@ -498,6 +517,7 @@ def bootstrap_weights(
                 heldout_cap=False,
                 raise_on_degenerate=False,
                 counts=counts,
+                run_ids=None if run_ids is None else runs,
             )
         except (ValueError, np.linalg.LinAlgError):
             continue

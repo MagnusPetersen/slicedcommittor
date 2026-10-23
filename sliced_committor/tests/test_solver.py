@@ -173,7 +173,7 @@ def test_sample_weights_reweight_the_boundary_error():
         s, in_A=in_A, in_B=in_B, n_directions=16, seed=1, sample_weights=jnp.ones(N) / N
     )
     np.testing.assert_allclose(
-        np.asarray(unif.boundary_errors), np.asarray(base.boundary_errors), rtol=1e-6
+        np.asarray(unif.boundary_errors), np.asarray(base.boundary_errors), rtol=1e-6, atol=1e-12
     )
     w = np.random.default_rng(0).uniform(0.1, 1.0, N)
     skew = sc.compute_sliced_committor(
@@ -385,3 +385,133 @@ def test_discrete_slice_balance_is_exact(binning):
     q = np.asarray(q)
     assert abs(m_A @ q - m_B @ (1.0 - q)) < 1e-8
     assert 0.0 <= m_A @ q < 0.5
+
+
+# --------------------------------------------------------------------------- #
+# sample weights in the slice construction
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("binning", ["equal_width", "quantile"])
+def test_weighted_slice_density_recovers_the_equilibrium_free_energy(binning):
+    """Flat (umbrella-like) sampling with importance weights: the weighted slice
+    density is the equilibrium one, the unweighted histogram is the sampling one."""
+    from sliced_committor.core.solver import compute_1d_free_energy
+
+    rng = np.random.default_rng(5)
+    s = rng.uniform(-2.0, 2.0, 200_000)
+    F_eq = (s**2 - 1.0) ** 2 * 2.0
+    w = np.exp(-F_eq)
+    w /= w.sum()
+    grid, F_w, e = compute_1d_free_energy(
+        jnp.asarray(s), 80, binning_method=binning, weights=jnp.asarray(w), return_edges=True
+    )
+    _, F_u = compute_1d_free_energy(jnp.asarray(s), 80, binning_method=binning)
+    e = np.asarray(e)
+    z = [np.linspace(e[i], e[i + 1], 201) for i in range(80)]
+    ref = np.array(
+        [-np.log(np.mean(np.exp(-2.0 * (zi**2 - 1.0) ** 2))) for zi in z]
+    )  # bin averages
+    ref -= ref.min()
+    inner = np.abs(np.asarray(grid)) < 1.5
+    assert np.max(np.abs(np.asarray(F_w)[inner] - ref[inner])) < 0.1
+    assert np.max(np.abs(np.asarray(F_u)[inner])) < 0.2  # flat sampling: only counting noise
+
+
+def test_integer_weights_reproduce_the_duplicated_samples():
+    """On equal-width bins a weight of ``k`` per frame and ``k`` copies of the frame
+    give the same histograms, so the same slice profiles."""
+    s, in_A, in_B = _bimodal_1d(sep=1.5, seed=7)
+    k = np.random.default_rng(0).integers(1, 4, s.size)
+    rep = np.repeat(np.arange(s.size), k)
+    kw = dict(directions=np.ones((1, 1)), n_bins=120, binning_method="equal_width")
+    weighted = sc.compute_sliced_committor(
+        s[:, None], in_A=in_A, in_B=in_B, sample_weights=k / k.sum(), **kw
+    )
+    copied = sc.compute_sliced_committor(s[rep, None], in_A=in_A[rep], in_B=in_B[rep], **kw)
+    np.testing.assert_allclose(
+        np.asarray(weighted.free_energies), np.asarray(copied.free_energies), atol=1e-10
+    )
+    np.testing.assert_allclose(
+        np.asarray(weighted.committors_1d), np.asarray(copied.committors_1d), atol=1e-10
+    )
+
+
+@pytest.mark.parametrize(
+    "binning,n", [("equal_width", 3000), ("quantile", 3000), ("quantile", 30000)]
+)
+def test_uniform_weights_reproduce_the_unweighted_slices(binning, n):
+    """Uniform weights take the weighted code path and land on the unweighted
+    slices to rounding, on both quantile paths (exact and subsampled edges)."""
+    s, in_A, in_B = two_basin_samples(n, dim=3, seed=2)
+    kw = dict(n_directions=6, seed=4, n_bins=60, binning_method=binning)
+    a = sc.compute_sliced_committor(s, in_A=in_A, in_B=in_B, **kw)
+    b = sc.compute_sliced_committor(
+        s, in_A=in_A, in_B=in_B, sample_weights=np.full(n, 1.0 / n), **kw
+    )
+    np.testing.assert_allclose(np.asarray(b.free_energies), np.asarray(a.free_energies), atol=1e-9)
+    np.testing.assert_allclose(np.asarray(b.committors_1d), np.asarray(a.committors_1d), atol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# the dimensionless absorption: rd_stiffness
+# --------------------------------------------------------------------------- #
+def _slice_quotient(s_vals, F, edges, s_A, s_B, q):
+    """``(INT rho_B q - INT rho_A q)^2 / sum_i c_{i+1/2} (q_{i+1} - q_i)^2`` on the slice's nodes."""
+    n = s_vals.shape[0]
+    idx = lambda v: np.clip(np.searchsorted(np.asarray(edges)[1:-1], np.asarray(v)), 0, n - 1)  # noqa: E731
+    m_A = np.bincount(idx(s_A), minlength=n) / s_A.shape[0]
+    m_B = np.bincount(idx(s_B), minlength=n) / s_B.shape[0]
+    rho = np.exp(-(np.asarray(F) - np.min(F)))
+    c = 0.5 * (rho[1:] + rho[:-1]) / np.diff(np.asarray(s_vals))
+    q = np.asarray(q)
+    return (m_B @ q - m_A @ q) ** 2 / np.sum(c * np.diff(q) ** 2), m_A, m_B, c
+
+
+def _profile(s, in_A, in_B, **kw):
+    from sliced_committor.core.solver import compute_1d_free_energy, compute_1d_rd_committor
+
+    s = jnp.asarray(s)
+    s_vals, F, edges = compute_1d_free_energy(s, 300, binning_method="quantile", return_edges=True)
+    s_A, s_B = s[in_A], s[in_B]
+    q = compute_1d_rd_committor(
+        s_vals,
+        F,
+        s_A,
+        s_B,
+        bin_edges=edges,
+        boundary_quantile=1.0,
+        s_A_sorted=jnp.sort(s_A),
+        s_B_sorted=jnp.sort(s_B),
+        **kw,
+    )
+    return s_vals, F, edges, s_A, s_B, q
+
+
+def test_zero_stiffness_is_the_closed_form_and_maximises_the_slice_quotient():
+    """``rd_stiffness = 0`` carries the flux ``C_A - C_B`` through every interface,
+    and no stiffness gives a profile with a larger quotient of its own."""
+    s, in_A, in_B = _bimodal_1d(sep=1.2, seed=3)  # overlapping projected states
+    quotients = {}
+    for stiff in (0.0, 1.0, 1e2, 1e4, None):
+        s_vals, F, edges, s_A, s_B, q = _profile(s, in_A, in_B, rd_kappa=1e12, stiffness=stiff)
+        quotients[stiff], m_A, m_B, c = _slice_quotient(s_vals, F, edges, s_A, s_B, q)
+        if stiff == 0.0:
+            flux = c * np.diff(np.asarray(q))
+            target = np.cumsum(m_A - m_B)[:-1]
+            scale = flux @ target / (target @ target)
+            np.testing.assert_allclose(flux, scale * target, atol=1e-10 * np.abs(flux).max())
+    assert all(quotients[0.0] >= v * (1 - 1e-9) for v in quotients.values()), quotients
+    assert quotients[0.0] > 1.05 * quotients[None], quotients
+
+
+def test_a_stiff_wall_recovers_the_absolute_default():
+    s, in_A, in_B = _bimodal_1d(sep=4.0, seed=1)
+    _, _, _, _, _, q_hard = _profile(s, in_A, in_B, rd_kappa=1e12, stiffness=None)
+    _, _, _, _, _, q_stiff = _profile(s, in_A, in_B, rd_kappa=1e12, stiffness=1e12)
+    assert np.max(np.abs(np.asarray(q_stiff) - np.asarray(q_hard))) < 1e-3
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("inf"), float("nan")])
+def test_rejects_a_negative_or_non_finite_stiffness(bad):
+    s, in_A, in_B = _toy()
+    with pytest.raises(ValueError, match="rd_stiffness"):
+        sc.compute_sliced_committor(s, in_A=in_A, in_B=in_B, n_directions=4, rd_stiffness=bad)
