@@ -77,9 +77,11 @@ class Weights(NamedTuple):
             (``cap``, ``se``, ``per_fold``, ``gap``); None otherwise.
         diagnostics: secondary quantities: the basin moments ``a``, ``b``, the
             constraint checks ``mu_A_check`` (~0) and ``mu_B_check`` (~1),
-            ``N_eff``, ``cond_chol``, ``n_negative_weights``,
-            ``off_diagonal_magnitude``, and for the half-set filter ``G_reg``,
-            ``band_ssnr``, ``lam_max``, ``lam_min_reg``.
+            ``N_eff``, ``cond_chol`` (the condition number of the system the
+            solve inverts: a Cholesky estimate for a ridge, the exact one of
+            the filtered Gram for the half-set filter),
+            ``n_negative_weights``, ``off_diagonal_magnitude``, and for the
+            half-set filter ``G_reg``, ``band_ssnr``, ``lam_max``, ``lam_min_reg``.
     """
 
     w: jnp.ndarray
@@ -138,34 +140,48 @@ def _ridged_gram(G, valid_mask, ridge):
     return G_masked + ridge * np.eye(valid.size)
 
 
-def _solve(G_reg, a, b, valid_mask):
+def _solve(G_reg, a, b, valid_mask, eig=None):
     """The closed form on the valid block of a regularised Gram.
 
     ``w = G_reg^-1 (b - a) / R`` with ``R = (b - a)^T G_reg^-1 (b - a)`` and
-    ``c = -a^T w``; scipy Cholesky with a least-squares fallback. Invalid
-    directions get ``w = 0``.
+    ``c = -a^T w``. Invalid directions get ``w = 0``. With ``eig``, the half-set
+    filter's ``info``, ``G_reg^-1 = V diag(1/lam_reg) V^T`` is applied in the
+    filter's own eigenbasis: the rebuilt ``G_reg`` sums eigenvalues the filter
+    inflates by up to ``1e12``, and the rounding of that sum lands on the
+    signal bands, where a factorisation of the rebuilt matrix reads it as
+    ``1e-5`` of the weights. Without it, scipy Cholesky with a least-squares
+    fallback.
     """
     from scipy.linalg import cho_factor, cho_solve
 
     valid = np.asarray(valid_mask, bool)
     iv = np.flatnonzero(valid)
-    G_v = np.asarray(G_reg, np.float64)[np.ix_(iv, iv)]
     a_np = np.asarray(a, np.float64)
     b_np = np.asarray(b, np.float64)
     av, bv = a_np[iv], b_np[iv]
     delta = bv - av
     cond_chol = float("inf")
-    try:
-        cf = cho_factor(G_v, lower=True)
-        w_dual = cho_solve(cf, delta)
-        Ginv_a = cho_solve(cf, av)
-        Ginv_b = cho_solve(cf, bv)
-        L_abs = np.abs(np.diag(cf[0]))
-        cond_chol = float((L_abs.max() / max(L_abs.min(), 1e-30)) ** 2)
-    except np.linalg.LinAlgError:
-        w_dual = np.linalg.lstsq(G_v, delta, rcond=None)[0]
-        Ginv_a = np.linalg.lstsq(G_v, av, rcond=None)[0]
-        Ginv_b = np.linalg.lstsq(G_v, bv, rcond=None)[0]
+    if eig is not None:
+        V, lam_reg = eig["V"], eig["lam_reg"]
+
+        def apply(r):
+            return V @ ((V.T @ r) / lam_reg)
+
+        w_dual, Ginv_a, Ginv_b = apply(delta), apply(av), apply(bv)
+        cond_chol = float(lam_reg.max() / lam_reg.min())
+    else:
+        G_v = np.asarray(G_reg, np.float64)[np.ix_(iv, iv)]
+        try:
+            cf = cho_factor(G_v, lower=True)
+            w_dual = cho_solve(cf, delta)
+            Ginv_a = cho_solve(cf, av)
+            Ginv_b = cho_solve(cf, bv)
+            L_abs = np.abs(np.diag(cf[0]))
+            cond_chol = float((L_abs.max() / max(L_abs.min(), 1e-30)) ** 2)
+        except np.linalg.LinAlgError:
+            w_dual = np.linalg.lstsq(G_v, delta, rcond=None)[0]
+            Ginv_a = np.linalg.lstsq(G_v, av, rcond=None)[0]
+            Ginv_b = np.linalg.lstsq(G_v, bv, rcond=None)[0]
     A_s = float(av @ Ginv_a)
     B_s = float(bv @ Ginv_b)
     R = float(delta @ w_dual)
@@ -338,6 +354,7 @@ def _solve_prepared(
         G1, G2 = hs.halfset_grams(G_folds, w_folds)
         del G_folds
         G_reg, info = hs.regularized_gram(G1, G2, valid_mask)
+        eig = info
         ridge = 0.0
         diagnostics.update(
             G_reg=jnp.asarray(G_reg),
@@ -350,7 +367,8 @@ def _solve_prepared(
     else:
         ridge = _auto_ridge(G, valid_mask, diagnostics["N_eff"]) if rule == "auto" else rule
         G_reg = _ridged_gram(G, valid_mask, ridge)
-    out = _solve(G_reg, a, b, valid_mask)
+        eig = None
+    out = _solve(G_reg, a, b, valid_mask, eig=eig)
     cond = _gate(out, raise_on_degenerate)
 
     w = out["w"]
@@ -410,8 +428,8 @@ def _heldout_cap(G_folds, w_folds, folds, valid_mask):
         btr = (wB[other] @ b_folds[other]) / max(wB[other].sum(), 1e-300)
         G1, G2 = hs.halfset_grams(G_folds, w_folds, folds=other)
         try:
-            G_reg, _ = hs.regularized_gram(G1, G2, valid_mask)
-            out = _solve(G_reg, atr, btr, valid_mask)
+            G_reg, info = hs.regularized_gram(G1, G2, valid_mask)
+            out = _solve(G_reg, atr, btr, valid_mask, eig=info)
         except (np.linalg.LinAlgError, ValueError):
             continue
         w = np.asarray(out["w"], np.float64)

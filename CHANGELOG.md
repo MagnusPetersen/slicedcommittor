@@ -30,8 +30,28 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   `rd_stiffness=0` the `kappa -> 0` limit in closed form,
   `q' ~ (C_A - C_B) / rho`. The default stays the absolute `rd_kappa`.
 
+### Changed
+
+- The half-set solve applies the filtered inverse in the filter's own
+  eigenbasis, `V diag(1/lam_reg) V^T`, instead of factorising the rebuilt
+  filtered Gram. The closed form is the same; the rebuild summed eigenvalues
+  the filter inflates by up to `1e12`, and its rounding reached the weights
+  at `1e-5` on a 64-direction Wolfe-Quapp fit. With the band-correlation fix
+  below, the half-set weights agree to `3e-13` between JAX 0.5.3, 0.6.2 and
+  0.10.1 and between CPUs, where they differed by up to `1.5e-3`.
+  `diagnostics["cond_chol"]` of a half-set solve is the exact condition
+  number of the filtered Gram. The golden references are re-frozen; their
+  independent reference path implements the filter and the solve from their
+  definitions on the half-Grams of the v0.6.0 prototype.
+
 ### Fixed
 
+- The band correlation of the half-set filter was centred (Pearson), so it
+  depended on the signs `eigh` gives the eigenvectors, which rounding can
+  flip. It is the uncentred correlation, which depends only on each band's
+  eigenspace. The transition RMSE of the paper's 2D, AIB9 and villin fits
+  and the held-out cap of its chignolin fit move by less than 0.1%; the
+  committor of the golden Wolfe-Quapp fit moves by `2e-3`.
 - Sample weights never reached the slices: each slice's density and state
   masses were unweighted histograms of a biased ensemble, and the weights
   entered only the Gram matrix and `boundary_errors`. They are now the
@@ -46,7 +66,9 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   so the filter regularised against their difference. It now passes the
   (window, replicate) runs as `run_ids`. On a 2D umbrella benchmark with
   exact weights the two fixes together take the transition RMSE from 0.029
-  to 0.009, the accuracy of unbiased sampling at the same budget.
+  to 0.009, the accuracy of unbiased sampling at the same budget. At the
+  paper's chignolin settings the held-out cap, read on the run-blocked
+  folds, selects the cone's `mu = 0.6` instead of 0.5.
 - A slice whose 1D solve is not finite no longer turns the reported
   `dirichlet_energy` and constraint checks into NaN; it contributes zeros,
   as it already did to the evaluated committor.

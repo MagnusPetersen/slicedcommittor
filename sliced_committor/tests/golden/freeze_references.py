@@ -10,13 +10,20 @@ depends on the slice basis and keeps the rest:
   ``eval_points`` and at the samples. The script checks the library's
   committor against a separate numpy evaluation (interpolate, clip, combine)
   of the same basis and weights before it writes.
-* ``halfset_reference.npz``: the regulariser cases and the Wolfe-Quapp samples
-  are kept (they do not depend on the basis; ``freeze_1_0_references.py``
-  made them). The Wolfe-Quapp fit and its held-out cap are refit, and the
-  fit's independent reference path, the numpy prototype the library was
-  ported from (``halfset_grams_from_arrays``, ``halfset_eigen_regularize``,
-  ``solve_with_G`` of the v0.6.0 ``recovar`` package), runs on the library's
-  own slopes and basin moments in a subprocess on the ``lib-0.6`` worktree.
+* ``halfset_reference.npz``: the Wolfe-Quapp samples and the inputs of the
+  regulariser cases are kept (``freeze_1_0_references.py`` made them); the
+  regulariser outputs are recomputed by ``FILTER_SPEC``, the band filter
+  written from its definition (numpy's eigensolver, the uncentred FSC
+  correlation), which is independent of the library's implementation. The
+  Wolfe-Quapp fit and its held-out cap are refit, and the fit's independent
+  reference path runs on the library's own slopes and basin moments in a
+  subprocess on the ``lib-0.6`` worktree: the half-Grams of the numpy
+  prototype the library was ported from (``halfset_grams_from_arrays`` of the
+  v0.6.0 ``recovar`` package), then ``FILTER_SPEC``'s filter and the
+  closed-form solve. The prototype's own filter
+  and solve are not used: its band correlation was centred, so it depended
+  on the signs of the eigenvectors, and its solve factorised the rebuilt
+  filtered Gram, which turns rounding into ``1e-5`` of the weights.
 
     git -C lib worktree add ../lib-0.6 v0.6.0   # once
     cd lib && JAX_PLATFORMS=cpu python sliced_committor/tests/golden/freeze_references.py
@@ -43,29 +50,68 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 import sliced_committor as sc
+from sliced_committor.core import _halfset as hs
 from sliced_committor.core._ebmc import _basis
 
 BASIS = os.path.join(HERE, "beta_invariance_golden.npz")
 EBMC = os.path.join(HERE, "ebmc_golden.npz")
 HALF = os.path.join(HERE, "halfset_reference.npz")
 
-REFERENCE_PATH = r"""
-import sys
+FILTER_SPEC = r"""
 import numpy as np
+
+
+def spec_band_filter(G1, G2, n_bands):
+    # eigenbands of the half-set mean, uncentred FSC correlation per band,
+    # SSNR = 2c / (1 - c), lam_reg = lam (1 + 1/SSNR) floored at 1e-12 max
+    G1, G2 = np.asarray(G1, np.float64), np.asarray(G2, np.float64)
+    lam, V = np.linalg.eigh(0.5 * (G1 + G2))
+    order = np.argsort(-lam)
+    lam, V = lam[order], V[:, order]
+    A1, A2 = V.T @ G1 @ V, V.T @ G2 @ V
+    edges = np.linspace(0, lam.size, n_bands + 1).astype(int)
+    band, ssnr = np.zeros(n_bands), np.zeros(lam.size)
+    for k in range(n_bands):
+        v1, v2 = A1[edges[k]:edges[k + 1]].ravel(), A2[edges[k]:edges[k + 1]].ravel()
+        if v1.size < 3 or v1.std() == 0 or v2.std() == 0:
+            sk = 1e6
+        else:
+            c = np.clip(v1 @ v2 / np.sqrt((v1 @ v1) * (v2 @ v2)), 0.0, 0.999999)
+            sk = 2.0 * c / (1.0 - c)
+        band[k] = sk
+        ssnr[edges[k]:edges[k + 1]] = sk
+    lam_reg = np.maximum(lam, 0.0) * (1.0 + 1.0 / np.maximum(ssnr, 1e-12))
+    lam_reg = np.maximum(lam_reg, 1e-12 * max(lam_reg.max(), 1e-300))
+    return V, lam, lam_reg, band
+
+
+def spec_solve(G1, G2, a, b, n_bands):
+    # the band filter, then the closed form w = G_reg^-1 (b - a) / R,
+    # R = (b - a)^T G_reg^-1 (b - a), c = -a^T w, with
+    # G_reg^-1 = V diag(1/lam_reg) V^T applied factor by factor
+    V, _, lam_reg, band = spec_band_filter(G1, G2, n_bands)
+    u = V @ ((V.T @ (b - a)) / lam_reg)
+    gap = float((b - a) @ u)
+    w = u / gap
+    return (V * lam_reg) @ V.T, band, w, gap, float(-(a @ w))
+"""
+
+REFERENCE_BODY = r"""
+import sys
 import recovar
 
 d = np.load(sys.argv[1])
 G1, G2 = recovar.halfset_grams_from_arrays(d["F"], None, d["cos"], d["in_A"], d["in_B"], n_folds=10)
 G1, G2 = np.asarray(G1, np.float64), np.asarray(G2, np.float64)
 iv = np.flatnonzero(d["valid"])
-G_reg, info = recovar.halfset_eigen_regularize(G1[np.ix_(iv, iv)], G2[np.ix_(iv, iv)], n_bands=12)
-sol = recovar.solve_with_G(G_reg, d["a"][iv], d["b"][iv])
+G_reg, band_ssnr, w_v, gap, c = spec_solve(G1[np.ix_(iv, iv)], G2[np.ix_(iv, iv)], d["a"][iv], d["b"][iv], 12)
 w = np.zeros(d["valid"].size)
-w[iv] = sol["w"]
-np.savez(sys.argv[2], G1=G1, G2=G2, G_reg=np.asarray(G_reg, np.float64),
-         band_ssnr=np.asarray(info["band_ssnr"], np.float64), w=w,
-         M_gap=float(sol["M_gap"]), c=float(sol["c"]))
+w[iv] = w_v
+np.savez(sys.argv[2], G1=G1, G2=G2, G_reg=G_reg, band_ssnr=band_ssnr, w=w, M_gap=gap, c=c)
 """
+REFERENCE_PATH = FILTER_SPEC + REFERENCE_BODY
+_spec = {}
+exec(FILTER_SPEC, _spec)
 
 
 def _f(x):
@@ -164,6 +210,17 @@ np.savez(EBMC, **e)
 # --------------------------------------------------------------------------- #
 h_old = _load(HALF)
 h = {k: v for k, v in h_old.items() if k == "spd_cases" or k.startswith(("spd::", "wq::"))}
+for M, nb, seed in h["spd_cases"]:
+    k = f"spd::{M}_{nb}_{seed}"
+    V, lam, lam_reg, band = _spec["spec_band_filter"](h[k + "::G1"], h[k + "::G2"], int(nb))
+    R = (V * lam_reg) @ V.T
+    lib_R, _ = hs.halfset_eigen_regularize(h[k + "::G1"], h[k + "::G2"], n_bands=int(nb))
+    dev = np.max(np.abs(lib_R - R)) / np.max(np.abs(R))
+    print(f"  regulariser case {k}: library vs spec {dev:.2e}")
+    _change(f"{k}::G_reg", h_old.get(k + "::G_reg"), R)
+    h.update(
+        {k + "::G_reg": R, k + "::band_ssnr": band, k + "::lam": lam, k + "::lam_reg": lam_reg}
+    )
 Xw, iA, iB = h["wq::X_4000_0"], h["wq::in_A_4000_0"], h["wq::in_B_4000_0"]
 q, fit = sc.fit_committor(
     jnp.asarray(Xw),

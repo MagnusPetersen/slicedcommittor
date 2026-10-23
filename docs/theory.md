@@ -106,11 +106,16 @@ noise is not the same across the spectrum. The library's default, the
 half-set spectral filter (`tikhonov="halfset_eigen"`), deals the frames
 into ten contiguous, basin-stratified folds, assembles a Gram matrix from
 the even folds and one from the odd folds, and compares the two in the
-eigenbasis of their mean, band by band (twelve bands). The correlation $c$
-of a band between the halves is read as a signal-to-noise ratio
-$\mathrm{SNR} = 2c / (1 - c)$, and the band's eigenvalues are inflated by
-$1 + 1/\mathrm{SNR}$: bands the halves agree on are left alone, bands they
-disagree on are damped in proportion. The filter has no constant and
+eigenbasis of their mean, band by band (twelve bands). The correlation
+$c$ of a band between the halves is uncentred,
+$\sum v_1 v_2 / (\sum v_1^2 \sum v_2^2)^{1/2}$ over the band's rows, so it
+does not depend on the signs the eigensolver gives the eigenvectors; it is
+read as a signal-to-noise ratio $\mathrm{SNR} = 2c / (1 - c)$, and the
+band's eigenvalues are inflated by $1 + 1/\mathrm{SNR}$: bands the halves
+agree on are left alone, bands they disagree on are damped in proportion.
+The solve applies the filtered inverse in that eigenbasis instead of
+factorising the filtered matrix, in which the damped bands, inflated by up
+to $10^{12}$, would round onto the others. The filter has no constant and
 nothing to select, which is why it is the paper's universal setting. It
 needs the frames in time order; a permutation of the frames destroys the
 independence of the two halves and reports the noise as smaller than it

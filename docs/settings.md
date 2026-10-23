@@ -186,7 +186,8 @@ summing to one (the solve refuses anything else). Every slice's density and
 state masses are then the weighted histograms, and the Gram matrix is the
 weighted average, so the Dirichlet energies of fits are comparable only for
 the same weights. The basin moments are plain averages over the labelled
-frames.
+frames, and the Fisher axis of the LDA cone is unweighted too: it
+discriminates the states as they were sampled.
 
 Frames that come from several runs (umbrella windows, replicates started
 from different structures) need `run_ids`, one label per frame, in

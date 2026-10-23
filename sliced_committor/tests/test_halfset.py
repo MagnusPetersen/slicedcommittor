@@ -1,5 +1,7 @@
 """The half-set toolkit: folds, half-Grams, the eigenband filter."""
 
+import os
+
 import jax
 import numpy as np
 import pytest
@@ -7,6 +9,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from sliced_committor.core import _halfset as hs
+from sliced_committor.core._ebmc import _solve
 
 from ._helpers import spd_pair as _spd_pair
 
@@ -98,3 +101,50 @@ def test_run_strata_give_every_fold_a_contiguous_share_of_every_run():
 def test_basin_strata_reject_misaligned_runs():
     with pytest.raises(ValueError, match="one entry per frame"):
         hs.basin_strata(np.zeros(4, bool), np.zeros(4, bool), np.zeros(3))
+
+
+def test_the_filter_commutes_with_a_relabelling_of_the_slices():
+    """The order of the slices is arbitrary; relabelling them permutes the
+    eigenvectors and lets eigh choose their signs afresh, so the filter commutes
+    with the permutation only if its band statistic ignores those signs."""
+    G1, G2 = _spd_pair(12, 3)
+    P = np.eye(12)[np.random.default_rng(4).permutation(12)]
+    R, info = hs.regularized_gram(G1, G2, np.ones(12, bool), n_bands=3)
+    R_p, info_p = hs.regularized_gram(P @ G1 @ P.T, P @ G2 @ P.T, np.ones(12, bool), n_bands=3)
+    np.testing.assert_allclose(R_p, P @ R @ P.T, rtol=1e-9, atol=1e-15)
+    np.testing.assert_allclose(info_p["band_ssnr"], info["band_ssnr"], rtol=1e-9)
+
+
+def test_the_band_correlation_ignores_eigenvector_signs():
+    """Flipping an eigenvector flips its row and column in both readings."""
+    rng = np.random.default_rng(0)
+    A1, A2 = rng.standard_normal((2, 6, 6))
+    flip = np.diag([1.0, -1.0, 1.0, -1.0, -1.0, 1.0])
+    band = slice(0, 3)
+    c = hs._band_correlation(A1[band].ravel(), A2[band].ravel())
+    B1, B2 = flip @ A1 @ flip, flip @ A2 @ flip
+    assert hs._band_correlation(B1[band].ravel(), B2[band].ravel()) == pytest.approx(c, rel=1e-12)
+
+
+def test_the_filtered_solve_keeps_rounding_at_rounding():
+    """Seven of the twelve bands of this 64-direction Wolfe-Quapp fit are
+    inflated by 1e12. A factorisation of the rebuilt filtered Gram reads the
+    rounding of those eigenvalues on the signal bands (1e-5 of the weights);
+    the solve in the filter's eigenbasis does not."""
+    path = os.path.join(os.path.dirname(__file__), "golden", "halfset_reference.npz")
+    with np.load(path) as z:
+        G1, G2, a, b = (z[f"wq_fit::{k}"] for k in ("G1", "G2", "a", "b"))
+        valid = z["wq_fit::valid_mask"]
+
+    def weights(G1, G2, eig=True):
+        G_reg, info = hs.regularized_gram(G1, G2, valid)
+        return np.asarray(_solve(G_reg, a, b, valid, eig=info if eig else None)["w"])
+
+    w = weights(G1, G2)
+    scale = np.max(np.abs(w))
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        E = rng.standard_normal(G1.shape)
+        E = 1e-15 * (E + E.T)
+        assert np.max(np.abs(weights(G1 * (1 + E), G2 * (1 - E)) - w)) < 1e-10 * scale
+    np.testing.assert_allclose(weights(G1, G2, eig=False), w, rtol=0.0, atol=1e-3 * scale)

@@ -80,6 +80,33 @@ error bar was not ported: 13x too small on molecular data.
 | `hist`, `kernel` and `pspline` conditional means | only the local-linear regression survived, inside the reparametrisation route |
 | `kramers_rate` on the committor with a fabricated ramp committor and a `nu_R` derived from the rate | `pmf_kramers_rate(pi, D)` takes profiles along a physical coordinate and reports what it computes |
 
+## Tried in the 2026-10 audit of the core
+
+Tried on a copy of the library and not adopted, under one rule: a change
+must be better on each of the paper's four systems (the 2D Wolfe-Quapp
+potential, AIB9, villin, chignolin) or a draw. The numbers are paired
+relative changes of the transition RMSE against each system's reference
+(2D 10 seeds, AIB9 5, villin 2 to 3), and of the held-out cap for
+chignolin, which has none. Two measures recur in the verdicts: the
+held-out cap preferred several changes that the references reject, and on
+chignolin every slice overlaps its states, so the cap and the read-off's
+`E / nu - 1` both rest on the basin moments and disagree with each other.
+
+| tried | result |
+|---|---|
+| the half-set filter on the unit-diagonal Gram `D^-1/2 G D^-1/2` | regularises less: the in-sample energy falls on every 2D, AIB9 and villin seed (chignolin's fit does not move). AIB9 -6.7% (5 of 5); undersampled 2D -15% to -35% (N = 2000 and 5000, 5 of 5); but 2D +8% and +17% at N = 20000 (4 of 5 worse), a coin flip at the paper's N = 1e5 (5 of 10), and villin +0.6% on the binned reference at every binning (a draw on the raw labels). The held-out cap prefers it everywhere, the cases it loses included. On a 500-sample fixture whose slice energies span 2.6e5 the plain filter drops nine of twelve bands, so this is the open lead |
+| a soft slice profile by default (`rd_stiffness`) | kept as an option; no value is better everywhere: `0` (closed form) AIB9 -8.4%, a 52-D embedded Wolfe-Quapp -32%, villin +45%; `1e4` AIB9 -6.8%, villin +1.5%; `1e5` AIB9 +3.3% |
+| the Fisher axis from the weighted class statistics on biased data | identical on unbiased data. On chignolin, at each axis's cap-selected cone, the cap falls 35% while `E / nu - 1` rises 31%, and the folding rate moves 41% |
+| cross-validated eigenvalues in place of the half-set filter (k-fold or half-split) | 2D +87%, eightfold on one seed; AIB9 -6.8% |
+| the harmonic mean of the bin densities as the slice conductance | 2D +2.3%; AIB9 unchanged |
+| absorption over a fixed fraction of each state's shadow | a constant to choose (2D -4% at one half, +6% at one quarter) that failed on a 2D umbrella benchmark |
+| zero slope outside each slice's sampled range | an exact no-op |
+| bin edges half at quantiles, half equally spaced | 2D +27%; chignolin cap +45% |
+| bands of fixed width (256/12 directions) instead of twelve bands | AIB9 -6.0% but cap +50%; 2D unchanged |
+| the band correlation averaged over 16 balanced splits of the folds | no change beyond 0.4% on any system |
+| the read-off's recalibration `q_tilde = f(q)` as the committor | 2D +7% to +8.5% (100 and 400 bins) |
+| averaging the committor over five direction seeds | AIB9 -1.5% at five times the cost |
+
 ## The umbrella workflow
 
 The orchestrator half of the `workflows` package (a registry of six lab

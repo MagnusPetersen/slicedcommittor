@@ -122,12 +122,27 @@ def _ssnr_from_corr(c):
     return 2.0 * c / (1.0 - c)
 
 
+def _band_correlation(v1, v2):
+    """The FSC correlation of two half-set readings, uncentred.
+
+    ``sum v1 v2 / sqrt(sum v1^2 sum v2^2)``. An eigenvector's sign is arbitrary
+    and flips the sign of its row and column in both readings at once, which
+    leaves this unchanged; a centred (Pearson) correlation would move with the
+    flip through the means, so the filter would depend on signs that ``eigh``
+    picks differently under rounding.
+    """
+    return float(v1 @ v2 / np.sqrt((v1 @ v1) * (v2 @ v2)))
+
+
 def halfset_eigen_regularize(G1, G2, n_bands=N_BANDS):
     """Wiener-filtered Gram from a half-Gram pair, in the eigenbands of their mean.
 
     ``lam_reg = max(lam, 0) (1 + 1/SSNR_k)`` band by band, floored at
-    ``1e-12 max(lam_reg)`` so the result is strictly positive definite.
-    Returns ``(G_reg, info)`` with ``info = dict(band_ssnr, lam, lam_reg)``.
+    ``1e-12 max(lam_reg)`` so the result is strictly positive definite. The
+    band correlation is uncentred (:func:`_band_correlation`), so the result
+    does not depend on the signs of the eigenvectors.
+    Returns ``(G_reg, info)`` with ``info = dict(band_ssnr, lam, lam_reg, V)``,
+    ``V`` the eigenvectors (columns, in the order of ``lam``).
     """
     from scipy.linalg import eigh
 
@@ -151,14 +166,14 @@ def halfset_eigen_regularize(G1, G2, n_bands=N_BANDS):
         if v1.size < 3 or v1.std() == 0 or v2.std() == 0:
             s = 1e6
         else:
-            s = _ssnr_from_corr(np.corrcoef(v1, v2)[0, 1])
+            s = _ssnr_from_corr(_band_correlation(v1, v2))
         band_ssnr[k] = s
         ssnr[sl] = s
     lam_reg = np.maximum(lam, 0.0) * (1.0 + 1.0 / np.maximum(ssnr, 1e-12))
     floor = 1e-12 * max(lam_reg.max(), 1e-300)
     lam_reg = np.maximum(lam_reg, floor)
     G_reg = (V * lam_reg) @ V.T
-    return G_reg, dict(band_ssnr=band_ssnr, lam=lam, lam_reg=lam_reg)
+    return G_reg, dict(band_ssnr=band_ssnr, lam=lam, lam_reg=lam_reg, V=V)
 
 
 def regularized_gram(G1, G2, valid_mask, n_bands=N_BANDS):
@@ -167,6 +182,8 @@ def regularized_gram(G1, G2, valid_mask, n_bands=N_BANDS):
 
     The restriction happens BEFORE the eigendecomposition: the zero rows of a
     masked direction would otherwise poison the low eigenbands' SSNR.
+    ``info`` carries the valid block's eigenvectors ``V`` and ``lam_reg``,
+    with which the solve applies ``G_reg^-1`` without the rebuilt matrix.
     """
     valid = np.asarray(valid_mask, bool)
     iv = np.flatnonzero(valid)
